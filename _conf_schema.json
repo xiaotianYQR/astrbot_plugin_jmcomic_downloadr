@@ -1,0 +1,140 @@
+{
+  "permission": {
+    "description": "命令权限：admin=仅管理员可用，everyone=所有人可用",
+    "type": "string",
+    "default": "admin",
+    "options": ["admin", "everyone"]
+  },
+  "download_dir": {
+    "description": "下载保存目录",
+    "hint": "留空则使用 AstrBot 数据目录下的 plugin_data/jmcomic_downloader/download",
+    "type": "string",
+    "default": ""
+  },
+  "zip_dir": {
+    "description": "zip 压缩包输出目录",
+    "hint": "留空则使用 plugin_data/jmcomic_downloader/zip",
+    "type": "string",
+    "default": ""
+  },
+  "client_impl": {
+    "description": "客户端实现",
+    "hint": "api=APP端，不限IP兼容性好；html=网页端，效率高但限制IP地区",
+    "type": "string",
+    "default": "api",
+    "options": ["api", "html"]
+  },
+  "image_decode": {
+    "description": "是否还原禁漫的混淆图片",
+    "type": "bool",
+    "default": true
+  },
+  "image_suffix": {
+    "description": "图片格式转换后缀",
+    "hint": "例如 .jpg 或 .png，留空表示不转换",
+    "type": "string",
+    "default": ""
+  },
+  "image_threads": {
+    "description": "同时下载图片的线程数",
+    "type": "int",
+    "default": 30
+  },
+  "photo_threads": {
+    "description": "同时下载章节数",
+    "hint": "0 表示自动（按 CPU 核数）",
+    "type": "int",
+    "default": 0
+  },
+  "retry_times": {
+    "description": "请求失败重试次数",
+    "type": "int",
+    "default": 5
+  },
+  "proxy": {
+    "description": "代理设置",
+    "hint": "留空=系统代理；可填写 127.0.0.1:7890 等",
+    "type": "string",
+    "default": ""
+  },
+  "zip_after_download": {
+    "description": "下载完成后打包为 zip 发送",
+    "type": "bool",
+    "default": true
+  },
+  "send_file": {
+    "description": "尝试发送 zip 文件",
+    "hint": "部分平台不支持文件消息，关闭后仅返回保存路径",
+    "type": "bool",
+    "default": true
+  },
+  "delete_zip_after_send": {
+    "description": "发送后删除本地 zip 压缩包",
+    "type": "bool",
+    "default": false
+  },
+  "send_progress": {
+    "description": "下载过程中发送进度消息",
+    "type": "bool",
+    "default": true
+  },
+  "max_concurrent": {
+    "description": "每个会话同时运行的最大下载任务数",
+    "type": "int",
+    "default": 2
+  },
+  "search_max": {
+    "description": "搜索结果显示的最大条数",
+    "type": "int",
+    "default": 5
+  },
+  "finish_reply": {
+    "description": "下载完成后回复发送者的文案",
+    "type": "string",
+    "default": "你的本子下载完成，已发送给你"
+  },
+  "smtp_host": {
+    "description": "SMTP 服务器地址（用于发送报错反馈邮件）",
+    "hint": "例如 smtp.qq.com，留空则 /jm report 不可用",
+    "type": "string",
+    "default": ""
+  },
+  "smtp_port": {
+    "description": "SMTP 端口",
+    "hint": "465 通常为 SSL，587 通常为 STARTTLS",
+    "type": "int",
+    "default": 465
+  },
+  "smtp_use_ssl": {
+    "description": "SMTP 是否使用 SSL",
+    "hint": "465 端口用 SSL；587 端口关闭此项并自动使用 STARTTLS",
+    "type": "bool",
+    "default": true
+  },
+  "smtp_user": {
+    "description": "SMTP 登录账号（发件邮箱）",
+    "type": "string",
+    "default": ""
+  },
+  "smtp_password": {
+    "description": "SMTP 授权码/密码",
+    "hint": "QQ 邮箱需使用授权码而非登录密码",
+    "type": "string",
+    "default": ""
+  },
+  "report_email": {
+    "description": "接收报错反馈的邮箱",
+    "type": "string",
+    "default": ""
+  },
+  "report_email_subject": {
+    "description": "报错反馈邮件主题",
+    "type": "string",
+    "default": "JMComic 插件报错反馈"
+  },
+  "report_history_lines": {
+    "description": "反馈邮件中附带最近的对话记录条数",
+    "type": "int",
+    "default": 50
+  }
+}
