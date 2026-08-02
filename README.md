@@ -2,7 +2,7 @@
 
 **AstrBot 插件**，基于 [jmcomic (JMComic-Crawler-Python)](https://github.com/hect0x7/JMComic-Crawler-Python) 构建，提供禁漫本子的**下载、搜索、详情查询**能力——后台下载、自动打包，完成后直接发送 ZIP 压缩包。
 
-![版本](https://img.shields.io/badge/版本-v1.6.0-blue)
+![版本](https://img.shields.io/badge/版本-v1.9.0-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.13.0-brightgreen)
 ![许可](https://img.shields.io/badge/License-AGPL--3.0-orange)
 ![Stars](https://img.shields.io/github/stars/xiaotianYQR/astrbot_jmcomic_downloader)
@@ -154,7 +154,30 @@ plugin_data/jmcomic_downloader/
 
 ## 📝 更新日志
 
-- **v1.6.0**：新增 ZIP 压缩包 AES-256 加密（`zip_password`）；下载指令改为 `/jm` 直接调用并移除邮件反馈；本子目录改为「车号-标题」，ZIP 内含顶层文件夹，修复打包范围与并发消息重复问题。
+### v1.9.0（2026-08-03）
+
+- 重构并美化 README：新增功能特性、配置项表格、常见问题、贡献者与致谢
+- 更新插件元数据与版本徽章
+
+<details>
+<summary>📜 查看往期更新日志</summary>
+
+### v1.6.0（2026-08-03）
+
+- 新增 ZIP 压缩包 AES-256 加密，支持配置解压密码（`zip_password`），加密包在 QQ 等平台不易触发文件发送限制
+- 新增加密依赖 pyzipper
+- 下载指令改为 `/jm` 直接调用并移除邮件反馈
+- 本子目录改为「车号-标题」，ZIP 内含顶层文件夹，解压即完整本子目录
+- 修复 ZIP 打包范围与并发消息重复问题
+- 优化回复信息与插件描述
+
+### v1.0.0（2026-08-02）
+
+- 首个正式版本：基于 jmcomic 的本子下载、搜索、详情查询
+- 后台下载并打包 ZIP 发送
+- 采用 AGPL-3.0 协议并补充 README
+
+</details>
 
 ## 👥 贡献者
 
