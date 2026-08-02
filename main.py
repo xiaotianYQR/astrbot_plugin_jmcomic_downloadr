@@ -4,7 +4,7 @@ JMComic 下载插件 (astrbot_plugin_jmcomic)
 
 基于 jmcomic (JMComic-Crawler-Python) 的 AstrBot 插件，提供：
 
-- /jm download <车号...>   后台下载本子/章节，完成后打包 zip 发送
+- /jm <车号...>            后台下载本子/章节，完成后打包 zip 发送
 - /jm info <车号>          查看本子详情（不下载）
 - /jm search <关键词>      站内搜索
 - /jm status               查看本会话的后台下载任务
@@ -26,14 +26,9 @@ import asyncio
 import logging
 import os
 import re
-import smtplib
 import time
-import traceback
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime
-from email.message import EmailMessage
-from email.utils import formatdate
 from pathlib import Path
 from typing import Any, Optional
 
@@ -159,8 +154,6 @@ class DownloadTask:
     album_fetched: bool = False
     fetched_album_id: str = ""
     fetched_title: str = ""
-    error_trace: str = ""
-    ticket_id: str = ""
     reply_message_id: str = ""
     dedup_key: tuple = ()
 
@@ -183,7 +176,6 @@ class JmcomicPlugin(Star):
         super().__init__(context)
         self.config: dict = config or {}
         self._tasks: dict[str, DownloadTask] = {}
-        self._tickets: dict[str, dict] = {}
         self._jm: Any = None
         self._bump_platform_timeouts()
 
@@ -380,174 +372,6 @@ class JmcomicPlugin(Star):
                     rel = os.path.relpath(full, src_dir)
                     arc = os.path.join(arc_root, rel) if arc_root else rel
                     zf.write(full, arc.replace("\\", "/"))
-
-    # ------------------------------------------------------------------
-    # 报错反馈（工单 + 邮件）
-    # ------------------------------------------------------------------
-
-    def _register_ticket(
-        self, task: DownloadTask, umo: str, albums: list[str], photos: list[str]
-    ) -> str:
-        """登记一个报错工单，返回工单号。只有报错时才会创建，/jm report 才能用。"""
-        ticket_id = f"T{int(time.time())}{len(self._tickets) % 100:02d}"
-        self._tickets[ticket_id] = {
-            "ticket_id": ticket_id,
-            "session_key": umo,
-            "created_at": time.time(),
-            "album_ids": list(albums),
-            "photo_ids": list(photos),
-            "fetched_album_id": task.fetched_album_id,
-            "fetched_title": task.fetched_title,
-            "error": task.message,
-            "traceback": task.error_trace,
-        }
-        # 简单清理，最多保留 100 个工单
-        if len(self._tickets) > 100:
-            oldest = min(self._tickets, key=lambda k: self._tickets[k]["created_at"])
-            self._tickets.pop(oldest, None)
-        return ticket_id
-
-    @staticmethod
-    def _extract_history_text(content) -> str:
-        """把平台消息历史 content 字段还原成文本。"""
-        try:
-            if isinstance(content, dict):
-                parts = content.get("message", [])
-            else:
-                parts = content or []
-        except Exception:
-            return ""
-        texts: list[str] = []
-        for p in parts:
-            if not isinstance(p, dict):
-                continue
-            ptype = p.get("type", "")
-            if ptype in ("plain", "text"):
-                t = str(p.get("text", "") or "")
-            elif ptype == "at":
-                t = f"@{p.get('name') or p.get('user_id') or '?'}"
-            elif ptype == "reply":
-                t = f"[回复 {p.get('sender_name')}] {p.get('text') or ''}"
-            else:
-                t = f"[{ptype}]"
-            if t:
-                texts.append(t)
-        return " ".join(texts).strip()
-
-    async def _get_chat_history(self, event: AstrMessageEvent, limit: int = 50) -> str:
-        """从 AstrBot 平台消息历史中读取该会话最近的聊天记录。"""
-        try:
-            mgr = getattr(self.context, "message_history_manager", None)
-            if mgr is None or getattr(mgr, "db", None) is None:
-                return ""
-            records = await mgr.get(
-                platform_id=event.get_platform_id(),
-                user_id=event.unified_msg_origin,
-                page=1,
-                page_size=max(1, int(limit)),
-            )
-        except Exception as e:
-            self.logger.warning(f"获取对话记录失败: {e}")
-            return ""
-        lines: list[str] = []
-        for r in records:
-            name = str(r.sender_name or r.sender_id or "?").strip()
-            text = self._extract_history_text(getattr(r, "content", None))
-            if not text:
-                continue
-            ts = getattr(r, "created_at", None)
-            t = ts.strftime("%m-%d %H:%M:%S") if ts else ""
-            lines.append(f"[{t}] {name}: {text}")
-        return "\n".join(lines)
-
-    def _build_report_body(self, ticket: dict, history: str) -> str:
-        """构造反馈邮件正文。"""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        lines = [
-            "JMComic 插件报错反馈",
-            "=" * 40,
-            f"反馈时间: {now}",
-            f"工单号: {ticket['ticket_id']}",
-            f"会话: {ticket['session_key']}",
-            f"下载任务: album={ticket['album_ids'] or '无'}, "
-            f"photo={ticket['photo_ids'] or '无'}",
-        ]
-        if ticket.get("fetched_album_id"):
-            lines.append(
-                f"本子: JM{ticket['fetched_album_id']}"
-                f"《{ticket.get('fetched_title') or '未知标题'}》"
-            )
-        lines += [
-            "",
-            "===== 错误信息 =====",
-            str(ticket.get("error") or "未知错误"),
-            "",
-            "===== 错误堆栈 =====",
-            str(ticket.get("traceback") or "（无）"),
-            "",
-            "===== 对话记录 =====",
-            history
-            or "（未获取到对话记录：群聊需在 WebUI 平台设置中开启群聊消息记录）",
-        ]
-        return "\n".join(lines)
-
-    def _send_email(self, subject: str, body: str) -> None:
-        """同步发送邮件（在 asyncio.to_thread 中运行）。"""
-        host = str(self._cfg("smtp_host", "") or "").strip()
-        port = int(self._cfg("smtp_port", 465) or 465)
-        user = str(self._cfg("smtp_user", "") or "").strip()
-        password = str(self._cfg("smtp_password", "") or "")
-        to_addr = str(self._cfg("report_email", "") or "").strip()
-        if not host or not user or not to_addr:
-            raise RuntimeError(
-                "未配置 SMTP 或接收邮箱，请到插件配置填写 "
-                "smtp_host / smtp_user / smtp_password / report_email。"
-            )
-
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = user
-        msg["To"] = to_addr
-        msg["Date"] = formatdate(localtime=True)
-        msg.set_content(body)
-
-        use_ssl = bool(self._cfg("smtp_use_ssl", True))
-        if use_ssl:
-            server = smtplib.SMTP_SSL(host, port, timeout=30)
-        else:
-            server = smtplib.SMTP(host, port, timeout=30)
-            try:
-                server.starttls()
-            except smtplib.SMTPNotSupportedError:
-                pass
-        try:
-            server.login(user, password)
-            server.send_message(msg)
-        finally:
-            try:
-                server.quit()
-            except Exception:
-                pass
-
-    async def _send_report(
-        self, event: AstrMessageEvent, ticket: dict
-    ) -> tuple[bool, str]:
-        """发送报错反馈邮件，返回 (是否成功, 用户可见消息)。"""
-        try:
-            history = await self._get_chat_history(
-                event, int(self._cfg("report_history_lines", 50))
-            )
-        except Exception as e:
-            history = ""
-            self.logger.warning(f"获取对话记录失败: {e}")
-        subject = str(self._cfg("report_email_subject", "JMComic 插件报错反馈"))
-        body = self._build_report_body(ticket, history)
-        try:
-            await asyncio.to_thread(self._send_email, subject, body)
-            return True, "✅ 报错反馈已发送给管理员邮箱，感谢反馈！"
-        except Exception as e:
-            self.logger.exception("反馈邮件发送失败")
-            return False, f"❌ 邮件发送失败: {e}"
 
     # ------------------------------------------------------------------
     # 后台任务（异步）
@@ -765,21 +589,8 @@ class JmcomicPlugin(Star):
         except Exception as e:
             task.status = "failed"
             task.message = str(e)
-            task.error_trace = traceback.format_exc()
             self.logger.exception("下载任务失败")
-            ticket_id = self._register_ticket(task, umo, albums, photos)
-            task.ticket_id = ticket_id
-            if task.album_fetched:
-                await send_text(
-                    f"⚠️ 本子获取成功（JM{task.fetched_album_id}），但下载出错，"
-                    f"请联系管理员解决。\n"
-                    f"如需反馈，请发送：/jm report {ticket_id}"
-                )
-            else:
-                await send_text(
-                    f"❌ 下载出错，请联系管理员解决。\n"
-                    f"如需反馈，请发送：/jm report {ticket_id}"
-                )
+            await send_text("❌ 下载错误，请重试或联系管理员。")
         finally:
             jm_logger.removeHandler(forwarder)
             if task.dedup_key:
@@ -805,21 +616,23 @@ class JmcomicPlugin(Star):
         """查看 JMComic 插件帮助"""
         help_text = (
             "🛠 JMComic 插件使用说明\n"
-            "• /jm download <车号...> — 下载本子，支持多个车号，"
-            "章节号加 p 前缀，如: /jm download 123 p456\n"
+            "• /jm <车号...> — 下载本子，支持多个车号，"
+            "章节号加 p 前缀，如: /jm 123 p456\n"
             "• /jm info <车号> — 查看本子详情\n"
             "• /jm search <关键词> — 站内搜索\n"
             "• /jm status — 查看本会话下载任务\n"
             "• /jm cancel <任务id> — 取消下载任务\n"
-            "• /jm report <工单号> — 下载报错后，把错误信息和对话记录"
-            "发送到管理员邮箱（仅在报错时可用）\n"
             "车号支持直接粘贴文本/链接，如 JM350234、"
             "https://18comic.vip/album/350234/\n"
             "下载完成后机器人会主动发送压缩包（部分平台不支持文件消息）。"
         )
         yield event.plain_result(help_text)
 
-    @jm.command("download", alias={"d", "dl", "下"})
+    # 根指令：/jm <车号...> 直接下载（不再需要 download 前缀）。
+    # 命令过滤器保证需要唤醒前缀（/jm、@机器人 等），
+    # 正则负向断言排除 help/info/search/status/cancel 等子命令。
+    @filter.command("jm")
+    @filter.regex(r"^(?!jm\s+(?:help|info|i|查看|search|s|搜|status|cancel)(?:\s|$))")
     async def download(self, event: AstrMessageEvent, ids: GreedyStr) -> None:
         """下载本子/章节（后台执行，完成后发送文件）"""
         if not self._check_permission(event):
@@ -841,7 +654,7 @@ class JmcomicPlugin(Star):
             return
 
         if not albums and not photos:
-            yield event.plain_result("❌ 没有识别到车号，示例: /jm download 123 p456")
+            yield event.plain_result("❌ 没有识别到车号，示例: /jm 123 p456")
             return
 
         session_key = event.unified_msg_origin
@@ -966,23 +779,6 @@ class JmcomicPlugin(Star):
             f"🛑 已请求取消任务 [{task_id}]。"
             "（底层线程无法强制中断，已下载图片会被缓存，重试会自动跳过）"
         )
-
-    @jm.command("report", alias={"反馈", "bug"})
-    async def report(self, event: AstrMessageEvent, ticket_id: str) -> None:
-        """下载报错后，发送报错信息与对话记录到管理员邮箱（仅报错时可用）"""
-        if not self._check_permission(event):
-            yield event.plain_result("⛔ 你没有权限使用本指令。")
-            return
-        ticket = self._tickets.get(ticket_id.strip())
-        if ticket is None or ticket["session_key"] != event.unified_msg_origin:
-            yield event.plain_result(
-                "❌ 无效的反馈指令：没有找到对应的报错记录。"
-                "该指令只在下载出错后可用。"
-            )
-            return
-        yield event.plain_result(f"📧 正在发送报错反馈（工单 {ticket_id}）…")
-        ok, msg = await self._send_report(event, ticket)
-        yield event.plain_result(msg)
 
     # ------------------------------------------------------------------
     # 格式化

@@ -92,49 +92,5 @@
     "description": "下载完成后回复发送者的文案",
     "type": "string",
     "default": "你的本子下载完成，已发送给你"
-  },
-  "smtp_host": {
-    "description": "SMTP 服务器地址（用于发送报错反馈邮件）",
-    "hint": "例如 smtp.qq.com，留空则 /jm report 不可用",
-    "type": "string",
-    "default": ""
-  },
-  "smtp_port": {
-    "description": "SMTP 端口",
-    "hint": "465 通常为 SSL，587 通常为 STARTTLS",
-    "type": "int",
-    "default": 465
-  },
-  "smtp_use_ssl": {
-    "description": "SMTP 是否使用 SSL",
-    "hint": "465 端口用 SSL；587 端口关闭此项并自动使用 STARTTLS",
-    "type": "bool",
-    "default": true
-  },
-  "smtp_user": {
-    "description": "SMTP 登录账号（发件邮箱）",
-    "type": "string",
-    "default": ""
-  },
-  "smtp_password": {
-    "description": "SMTP 授权码/密码",
-    "hint": "QQ 邮箱需使用授权码而非登录密码",
-    "type": "string",
-    "default": ""
-  },
-  "report_email": {
-    "description": "接收报错反馈的邮箱",
-    "type": "string",
-    "default": ""
-  },
-  "report_email_subject": {
-    "description": "报错反馈邮件主题",
-    "type": "string",
-    "default": "JMComic 插件报错反馈"
-  },
-  "report_history_lines": {
-    "description": "反馈邮件中附带最近的对话记录条数",
-    "type": "int",
-    "default": 50
   }
 }

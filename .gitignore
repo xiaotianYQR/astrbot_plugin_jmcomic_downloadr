@@ -219,3 +219,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 本地测试文件（不上传到 GitHub，不打包进插件）
+tests/
