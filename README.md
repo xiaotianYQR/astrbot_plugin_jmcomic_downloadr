@@ -40,6 +40,10 @@
 
 - `permission`：`admin`（默认，仅管理员）/ `everyone`（所有人）
 - `download_dir` / `zip_dir`：下载目录与压缩包输出目录，默认在 AstrBot 的 `data/plugin_data/jmcomic_downloader/` 下
+
+> 下载目录结构：`下载目录/<车号>-<本子名称>/<章节序号>/图片`（如 `12345-我是本子/1/00001.jpg`）。
+> 每个本子独立一个文件夹，打包 zip 时只包含该本子；压缩包文件名仍只有车号（如 `JM12345.zip`）。
+> zip 内部以 `车号-本子名称/` 作为顶层目录，解压后即是一个完整的本子文件夹。
 - `client_impl`：`api`（APP 端，不限 IP）/ `html`（网页端，效率高）
 - `image_decode`：是否还原混淆图片（默认开）
 - `image_suffix`：图片格式转换（如 `.jpg`、`.png`，留空不转换）

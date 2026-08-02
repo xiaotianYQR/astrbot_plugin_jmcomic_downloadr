@@ -93,6 +93,31 @@ def _release_cmd_dedup(dedup_key: tuple) -> None:
     _cmd_dedup.pop(dedup_key, None)
 
 
+# 并发下载任务共享同一个 jmcomic logger，日志可能被多个任务重复转发，
+# 导致同一条消息被发送两次。用 (会话, 文本) 短窗口去重兜底；
+# 会话内最后一个任务结束时清空记录，避免误伤顺序执行的后续任务。
+SEND_DEDUP_WINDOW = 30.0
+_send_dedup: dict[tuple, float] = {}
+
+
+def _check_send_dedup(key: tuple) -> bool:
+    """尝试认领一次消息发送；短窗口内已有相同消息则返回 False（不再发送）。"""
+    now = time.time()
+    stale = [k for k, t in _send_dedup.items() if now - t > SEND_DEDUP_WINDOW]
+    for k in stale:
+        _send_dedup.pop(k, None)
+    if now - _send_dedup.get(key, 0) < SEND_DEDUP_WINDOW:
+        return False
+    _send_dedup[key] = now
+    return True
+
+
+def _clear_session_send_dedup(session_key: str) -> None:
+    """清空某个会话的去重记录（会话内已无运行中的任务时调用）。"""
+    for k in [k for k in _send_dedup if k[0] == session_key]:
+        _send_dedup.pop(k, None)
+
+
 def _looks_like_timeout(e: BaseException) -> bool:
     """判断异常是否是超时类错误（大文件上传超时通常实际已送达）。"""
     name = type(e).__name__.lower()
@@ -145,6 +170,12 @@ def _safe_filename(text: str, max_len: int = 60) -> str:
     text = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", text).strip()
     text = re.sub(r"\s+", " ", text)
     return text[:max_len] or "untitled"
+
+
+def _album_folder_name(album) -> str:
+    """生成本子文件夹名：车号-标题，如 12345-我是本子。"""
+    title = getattr(album, "title", "") or getattr(album, "name", "") or ""
+    return f"{album.id}-{_safe_filename(title, 60)}"
 
 
 class JmcomicPlugin(Star):
@@ -251,10 +282,20 @@ class JmcomicPlugin(Star):
         photo_threads = int(self._cfg("photo_threads", 0) or 0)
         if photo_threads > 0:
             threading_cfg["photo"] = photo_threads
+        # 注册自定义本子目录字段：Aalbum_dirname -> "车号-标题"（如 12345-我是本子）。
+        # jmcomic 自 2.4.5 起支持从 JmModuleConfig.AFIELD_ADVICE 取自定义目录名。
+        try:
+            jm.JmModuleConfig.AFIELD_ADVICE["album_dirname"] = _album_folder_name
+        except Exception:
+            pass  # 注册失败时退回默认规则，不影响下载
         return jm.JmOption.construct(
             {
                 "dir_rule": {
-                    "rule": "Bd_Pname",
+                    # 本子目录 = 车号-标题（Aalbum_dirname），章节 = 章节序号（Pindex）。
+                    # Aalbum_dirname 以 A 开头，保证 decide_album_root_dir() 返回本子级目录，
+                    #    打包 zip 时只包含当前本子，不会把整个下载缓存目录打进去；
+                    # 标题中的 Windows 非法字符会被 jmcomic 自动替换，中文可正常保留。
+                    "rule": "Bd/Aalbum_dirname/Pindex",
                     "base_dir": str(self._download_root()),
                     "normalize_zh": None,
                 },
@@ -325,15 +366,20 @@ class JmcomicPlugin(Star):
         photo = ret.detail
         return option.dir_rule.decide_image_save_dir(photo.from_album, photo)
 
-    def _zip_dir(self, src_dir: str, zip_path: str) -> None:
-        """把整个文件夹打包为 zip。"""
+    def _zip_dir(self, src_dir: str, zip_path: str, arc_root: str = "") -> None:
+        """把整个文件夹打包为 zip，zip 内以 arc_root 作为顶层目录名。"""
         src_dir = os.path.abspath(src_dir)
+        zip_path_abs = os.path.abspath(zip_path)
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, _, files in os.walk(src_dir):
                 for name in files:
                     full = os.path.join(root, name)
-                    arc = os.path.relpath(full, src_dir)
-                    zf.write(full, arc)
+                    # 防止把输出 zip 本身打进去（zip_dir 配置在下载目录内时）
+                    if os.path.abspath(full) == zip_path_abs:
+                        continue
+                    rel = os.path.relpath(full, src_dir)
+                    arc = os.path.join(arc_root, rel) if arc_root else rel
+                    zf.write(full, arc.replace("\\", "/"))
 
     # ------------------------------------------------------------------
     # 报错反馈（工单 + 邮件）
@@ -540,6 +586,9 @@ class JmcomicPlugin(Star):
 
         async def send_text(text: str) -> None:
             try:
+                # 并发任务会把同一条 jmcomic 日志转发到多个任务队列，去重后只发一次
+                if not _check_send_dedup((umo, text)):
+                    return
                 await self.context.send_message(umo, MessageChain().message(text))
             except Exception as e:
                 self.logger.warning(f"进度消息发送失败: {e}")
@@ -559,6 +608,9 @@ class JmcomicPlugin(Star):
                     r"本子获取成功: \[(\d+)\].*?标题: \[(.*?)\]", msg, re.S
                 )
                 if m:
+                    # 只认领本任务的 album 日志，避免并发任务互相污染状态和重复发送
+                    if m.group(1) not in albums:
+                        return
                     task.album_fetched = True
                     task.fetched_album_id = m.group(1)
                     task.fetched_title = m.group(2)
@@ -571,6 +623,8 @@ class JmcomicPlugin(Star):
             elif topic == "album.after":
                 m = re.search(r"\[(\d+)\]", msg)
                 mid = m.group(1) if m else ""
+                if mid and mid not in albums:
+                    return  # 其他并发任务的日志
                 await send_text(
                     f"✅ 本子下载完成: JM{mid}" if mid else f"✅ {msg}"
                 )
@@ -633,7 +687,12 @@ class JmcomicPlugin(Star):
                     zip_name = f"JM{entity_id}.zip"
                     zip_path = os.path.join(str(zip_root), zip_name)
                     try:
-                        self._zip_dir(target_dir, zip_path)
+                        # zip 内顶层目录 = 本子文件夹（车号-标题），
+                        # 单章下载时保留 车号-标题/章节序号 的层级
+                        arc_root = os.path.relpath(
+                            target_dir, self._download_root()
+                        )
+                        self._zip_dir(target_dir, zip_path, arc_root)
                         zip_files.append((zip_name, zip_path))
                     except Exception as e:
                         self.logger.exception(f"打包失败: {target_dir}")
@@ -725,6 +784,13 @@ class JmcomicPlugin(Star):
             jm_logger.removeHandler(forwarder)
             if task.dedup_key:
                 _release_cmd_dedup(task.dedup_key)
+            # 会话内没有其他运行中的任务时，清空该会话的消息去重记录，
+            # 避免误伤用户随后顺序发起的下载
+            if not any(
+                t.session_key == umo and t.status == "running"
+                for t in self._tasks.values()
+            ):
+                _clear_session_send_dedup(umo)
 
     # ------------------------------------------------------------------
     # 指令组

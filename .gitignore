@@ -51,6 +51,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# 打包产物（插件 zip 等）
+*.zip
+
 # Translations
 *.mo
 *.pot
