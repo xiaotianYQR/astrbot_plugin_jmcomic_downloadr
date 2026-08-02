@@ -1,4 +1,4 @@
-# astrbot_plugin_jmcomic
+# astrbot_plugin_jmcomic_downloadr
 
 基于 [jmcomic (JMComic-Crawler-Python)](https://github.com/hect0x7/JMComic-Crawler-Python) 的 AstrBot 插件，提供禁漫本子的下载、搜索、详情查询能力。
 
