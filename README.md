@@ -1,4 +1,4 @@
-# 🎴 JMComic 下载器
+# JMComic 下载器
 
 **AstrBot 插件**，基于 [jmcomic (JMComic-Crawler-Python)](https://github.com/hect0x7/JMComic-Crawler-Python) 构建，提供禁漫本子的**下载、搜索、详情查询**能力——后台下载、自动打包，完成后直接发送 ZIP 压缩包。
 
