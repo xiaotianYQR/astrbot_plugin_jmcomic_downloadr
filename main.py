@@ -28,6 +28,10 @@ import os
 import re
 import time
 import zipfile
+try:
+    import pyzipper
+except Exception:  # pragma: no cover - 可选依赖，未安装时仅加密功能不可用
+    pyzipper = None  # type: ignore
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -358,11 +362,30 @@ class JmcomicPlugin(Star):
         photo = ret.detail
         return option.dir_rule.decide_image_save_dir(photo.from_album, photo)
 
-    def _zip_dir(self, src_dir: str, zip_path: str, arc_root: str = "") -> None:
-        """把整个文件夹打包为 zip，zip 内以 arc_root 作为顶层目录名。"""
+    def _zip_dir(
+        self, src_dir: str, zip_path: str, arc_root: str = "", password: str = ""
+    ) -> None:
+        """把整个文件夹打包为 zip，zip 内以 arc_root 作为顶层目录名。
+
+        password 非空时使用 pyzipper 的 AES-256 加密
+        （加密压缩包在 QQ 等平台不易触发文件发送限制）。
+        """
         src_dir = os.path.abspath(src_dir)
         zip_path_abs = os.path.abspath(zip_path)
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        password = (password or "").strip()
+        if password:
+            if pyzipper is None:
+                raise RuntimeError(
+                    "未安装 pyzipper，无法加密压缩包，请执行 pip install pyzipper"
+                )
+            zf_cls = pyzipper.AESZipFile
+            zf_kwargs = {"encryption": pyzipper.WZ_AES}
+        else:
+            zf_cls = zipfile.ZipFile
+            zf_kwargs = {}
+        with zf_cls(zip_path, "w", zipfile.ZIP_DEFLATED, **zf_kwargs) as zf:
+            if password:
+                zf.setpassword(password.encode("utf-8"))
             for root, _, files in os.walk(src_dir):
                 for name in files:
                     full = os.path.join(root, name)
@@ -484,6 +507,8 @@ class JmcomicPlugin(Star):
             summary: list[str] = []
             failed_any = False
             zip_files: list[tuple[str, str]] = []  # (name, abs path)
+            zip_password = str(self._cfg("zip_password", "") or "").strip()
+            pwd_hint = f"\n🔑 解压密码: {zip_password}" if zip_password else ""
             for kind, ret in results:
                 dler = ret.downloader
                 target_dir = self._result_target_dir(option, kind, ret)
@@ -516,7 +541,7 @@ class JmcomicPlugin(Star):
                         arc_root = os.path.relpath(
                             target_dir, self._download_root()
                         )
-                        self._zip_dir(target_dir, zip_path, arc_root)
+                        self._zip_dir(target_dir, zip_path, arc_root, zip_password)
                         zip_files.append((zip_name, zip_path))
                     except Exception as e:
                         self.logger.exception(f"打包失败: {target_dir}")
@@ -541,10 +566,10 @@ class JmcomicPlugin(Star):
                                 continue
                             self.logger.exception("发送压缩包失败")
                             await send_text(
-                                f"📦 压缩包已生成，但发送失败: {e}\n路径: {zip_path}"
+                                f"📦 压缩包已生成，但发送失败: {e}\n路径: {zip_path}{pwd_hint}"
                             )
                     else:
-                        await send_text(f"📦 压缩包路径: {zip_path}")
+                        await send_text(f"📦 压缩包路径: {zip_path}{pwd_hint}")
 
             # 2. 引用回复发送者：下载完成
             reply_text = str(self._cfg("finish_reply", "你的本子下载完成，已发送给你"))
@@ -555,7 +580,11 @@ class JmcomicPlugin(Star):
                 if str(mid).isdigit():
                     mid = int(mid)
                 reply_chain.chain.append(Reply(id=mid))
-            reply_chain.message(f"✅ {reply_text}")
+            if zip_files and zip_password:
+                # 完成文案与解压密码合并为同一条文本，保证出现在同一条引用回复中
+                reply_chain.message(f"✅ {reply_text}\n🔑 解压密码: {zip_password}")
+            else:
+                reply_chain.message(f"✅ {reply_text}")
             if failed_any:
                 reply_chain.message(
                     "⚠️ 部分内容下载失败，可重试下载（已缓存图片会跳过）。"
@@ -567,7 +596,7 @@ class JmcomicPlugin(Star):
             except Exception as e:
                 self.logger.exception("发送下载完成消息失败")
                 await send_text(
-                    f"✅ {reply_text}\n下载结果: {self._download_root()}\n"
+                    f"✅ {reply_text}{pwd_hint}\n下载结果: {self._download_root()}\n"
                     f"（消息发送失败: {e}）"
                 )
 
@@ -607,11 +636,37 @@ class JmcomicPlugin(Star):
     # 指令组
     # ------------------------------------------------------------------
 
-    @filter.command_group("jm")
-    def jm(self) -> None:
-        """JMComic：下载 / 搜索 / 查看本子。输入 /jm help 查看帮助。"""
+    # 统一指令入口：/jm <参数>。
+    # 注意：只注册一个根指令 /jm，不再注册 command_group，
+    # 否则 AstrBot 会把“指令组 jm”与“裸指令 jm”识别为重名指令。
+    # 首词分发：help/info/i/查看/search/s/搜/status/cancel 走对应子功能，
+    # 其余内容一律当作车号直接下载。
+    @filter.command("jm")
+    async def jm(self, event: AstrMessageEvent, args: GreedyStr) -> None:
+        """JMComic 指令入口：/jm <车号> 直接下载，/jm help 查看帮助。"""
+        text = args.strip()
+        parts = text.split(maxsplit=1) if text else []
+        cmd = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if cmd in ("", "help"):
+            async for r in self.help_cmd(event):
+                yield r
+        elif cmd in ("info", "i", "查看"):
+            async for r in self.info(event, rest):
+                yield r
+        elif cmd in ("search", "s", "搜"):
+            async for r in self.search(event, rest):
+                yield r
+        elif cmd == "status":
+            async for r in self.status(event):
+                yield r
+        elif cmd == "cancel":
+            async for r in self.cancel(event, rest):
+                yield r
+        else:
+            async for r in self.download(event, text):
+                yield r
 
-    @jm.command("help")
     async def help_cmd(self, event: AstrMessageEvent) -> None:
         """查看 JMComic 插件帮助"""
         help_text = (
@@ -628,11 +683,6 @@ class JmcomicPlugin(Star):
         )
         yield event.plain_result(help_text)
 
-    # 根指令：/jm <车号...> 直接下载（不再需要 download 前缀）。
-    # 命令过滤器保证需要唤醒前缀（/jm、@机器人 等），
-    # 正则负向断言排除 help/info/search/status/cancel 等子命令。
-    @filter.command("jm")
-    @filter.regex(r"^(?!jm\s+(?:help|info|i|查看|search|s|搜|status|cancel)(?:\s|$))")
     async def download(self, event: AstrMessageEvent, ids: GreedyStr) -> None:
         """下载本子/章节（后台执行，完成后发送文件）"""
         if not self._check_permission(event):
@@ -691,9 +741,11 @@ class JmcomicPlugin(Star):
         # 导致大模型也回复一条消息。
         event.stop_event()
 
-    @jm.command("info", alias={"i", "查看"})
     async def info(self, event: AstrMessageEvent, album_id: str) -> None:
         """查看本子详情（不下载）"""
+        if not album_id.strip():
+            yield event.plain_result("❌ 请输入车号，示例: /jm info 123")
+            return
         if not self._check_permission(event):
             yield event.plain_result("⛔ 你没有权限使用本指令。")
             return
@@ -711,7 +763,6 @@ class JmcomicPlugin(Star):
             self.logger.exception("查询本子详情失败")
             yield event.plain_result(f"❌ 查询失败: {e}")
 
-    @jm.command("search", alias={"s", "搜"})
     async def search(self, event: AstrMessageEvent, keyword: GreedyStr) -> None:
         """站内搜索本子"""
         if not self._check_permission(event):
@@ -744,7 +795,6 @@ class JmcomicPlugin(Star):
             self.logger.exception("搜索失败")
             yield event.plain_result(f"❌ 搜索失败: {e}")
 
-    @jm.command("status")
     async def status(self, event: AstrMessageEvent) -> None:
         """查看本会话的后台下载任务"""
         session_key = event.unified_msg_origin
@@ -763,9 +813,11 @@ class JmcomicPlugin(Star):
             )
         yield event.plain_result("\n".join(lines))
 
-    @jm.command("cancel")
     async def cancel(self, event: AstrMessageEvent, task_id: str) -> None:
         """取消下载任务"""
+        if not task_id.strip():
+            yield event.plain_result("❌ 请提供任务 ID，示例: /jm cancel <任务id>")
+            return
         task = self._tasks.get(task_id.strip())
         if task is None or task.session_key != event.unified_msg_origin:
             yield event.plain_result("❌ 找不到该任务（只能取消自己会话的任务）。")
