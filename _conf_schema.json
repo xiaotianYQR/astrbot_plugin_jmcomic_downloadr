@@ -73,6 +73,12 @@
     "type": "bool",
     "default": false
   },
+  "zip_password": {
+    "description": "压缩包解压密码（AES-256 加密）",
+    "hint": "留空不加密；填写后发送的本子 zip 使用该密码 AES-256 加密，可降低 QQ 等平台的文件发送限制风险",
+    "type": "string",
+    "default": ""
+  },
   "send_progress": {
     "description": "下载过程中发送进度消息",
     "type": "bool",
