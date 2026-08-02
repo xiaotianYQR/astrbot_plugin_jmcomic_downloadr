@@ -46,6 +46,7 @@
 - `image_threads` / `photo_threads`：并发数
 - `proxy`：代理，留空使用系统代理
 - `zip_after_download` / `send_file` / `delete_zip_after_send`：打包与发送行为
+- `zip_password`：压缩包解压密码（AES-256 加密），留空不加密；填写后发送的 zip 会附带解压密码提示
 - `send_progress`：是否发送下载进度
 - `max_concurrent`：每个会话最多同时运行的任务数
 - `search_max`：搜索结果条数
@@ -54,5 +55,6 @@
 ## 说明
 
 - 下载在后台线程执行，任务结束前机器人会主动推送进度与结果；部分平台不支持文件消息，会退回发送文件保存路径。
+- 配置 `zip_password` 后，下载完成的 zip 使用 AES-256 加密，发送文件时会附带解压密码（加密压缩包在 QQ 等平台不易触发文件发送限制）。
 - 图片有磁盘缓存，重复下载会跳过已存在文件；取消任务不会删除已下载内容。
 - 默认只有管理员可用（`permission: admin`）。AstrBot 管理员需在平台适配器配置中设置（如 aiocqhttp 的 `admin_id`）。
