@@ -4,7 +4,7 @@ JMComic 下载插件 (astrbot_plugin_jmcomic)
 
 基于 jmcomic (JMComic-Crawler-Python) 的 AstrBot 插件，提供：
 
-- /jm download <车号...>   后台下载本子/章节，完成后打包 zip 发送
+- /jm <车号...>            后台下载本子/章节，完成后打包 zip 发送
 - /jm info <车号>          查看本子详情（不下载）
 - /jm search <关键词>      站内搜索
 - /jm status               查看本会话的后台下载任务
@@ -12,7 +12,8 @@ JMComic 下载插件 (astrbot_plugin_jmcomic)
 - /jm help                 帮助
 
 说明：
-- 车号支持任意文本，例如 123、JM123、https://18comic.vip/album/123/；
+- 直接发送 /jm <车号> 即可开始下载，例如 /jm 123 或 /jm 123 p456。
+  车号支持任意文本，例如 123、JM123、https://18comic.vip/album/123/；
   章节号以 p 开头，例如 p456。
 - 下载任务在后台运行，完成后会主动推送压缩包（部分平台不支持文件消息，
   会退回发送保存路径文本）。
@@ -26,9 +27,11 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import smtplib
 import time
 import traceback
+import uuid
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,6 +48,14 @@ try:
     from astrbot.core.star.filter.command import GreedyStr
 except Exception:  # pragma: no cover - 兼容旧版本 AstrBot
     GreedyStr = str  # type: ignore
+
+try:
+    import pyzipper
+
+    PYZIPPER_AVAILABLE = True
+except Exception:  # pragma: no cover - 未安装 pyzipper 时退回普通 zip
+    pyzipper = None  # type: ignore
+    PYZIPPER_AVAILABLE = False
 
 try:
     from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
@@ -325,15 +336,41 @@ class JmcomicPlugin(Star):
         photo = ret.detail
         return option.dir_rule.decide_image_save_dir(photo.from_album, photo)
 
-    def _zip_dir(self, src_dir: str, zip_path: str) -> None:
-        """把整个文件夹打包为 zip。"""
+    def _zip_dir(self, src_dir: str, zip_path: str, password: str = "") -> None:
+        """把整个文件夹打包为 zip；配置密码且安装了 pyzipper 时生成 AES 加密 zip。"""
         src_dir = os.path.abspath(src_dir)
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _, files in os.walk(src_dir):
-                for name in files:
-                    full = os.path.join(root, name)
-                    arc = os.path.relpath(full, src_dir)
-                    zf.write(full, arc)
+        zip_path = os.path.abspath(zip_path)
+        password = str(password or "")
+        if password and PYZIPPER_AVAILABLE:
+            with pyzipper.AESZipFile(
+                zip_path,
+                "w",
+                compression=pyzipper.ZIP_DEFLATED,
+                encryption=pyzipper.WZ_AES,
+            ) as zf:
+                zf.setpassword(password.encode("utf-8"))
+                self._zip_write_tree(zf, src_dir, zip_path)
+        else:
+            if password:
+                self.logger.warning(
+                    "已配置 zip 加密密码，但未安装 pyzipper，将退回普通 zip。"
+                    "请执行: pip install pyzipper"
+                )
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                self._zip_write_tree(zf, src_dir, zip_path)
+
+    @staticmethod
+    def _zip_write_tree(zf, src_dir: str, zip_path: str) -> None:
+        """把 src_dir 下所有文件写入 zip，排除 zip 输出文件自身（防止自打包）。"""
+        src_dir = os.path.abspath(src_dir)
+        zip_path = os.path.abspath(zip_path)
+        for root, _, files in os.walk(src_dir):
+            for name in files:
+                full = os.path.abspath(os.path.join(root, name))
+                if full == zip_path:
+                    continue
+                arc = os.path.relpath(full, src_dir)
+                zf.write(full, arc)
 
     # ------------------------------------------------------------------
     # 报错反馈（工单 + 邮件）
@@ -606,6 +643,7 @@ class JmcomicPlugin(Star):
             summary: list[str] = []
             failed_any = False
             zip_files: list[tuple[str, str]] = []  # (name, abs path)
+            zipped_dirs: dict[str, str] = {}  # zip name -> 对应的原始下载目录
             for kind, ret in results:
                 dler = ret.downloader
                 target_dir = self._result_target_dir(option, kind, ret)
@@ -627,19 +665,44 @@ class JmcomicPlugin(Star):
                 )
 
                 if self._cfg("zip_after_download", True) and os.path.isdir(target_dir):
-                    zip_root = self._zip_root()
-                    zip_root.mkdir(parents=True, exist_ok=True)
-                    # 压缩包文件名只保留车号，不包含本子名称
-                    zip_name = f"JM{entity_id}.zip"
-                    zip_path = os.path.join(str(zip_root), zip_name)
+                    # 安全校验：只打包下载目录内的子目录，防止目录配置异常时
+                    # 把整个下载根目录（含其他车号/他人的文件）打包进去
+                    abs_target = os.path.abspath(target_dir)
+                    download_root = os.path.abspath(str(self._download_root()))
                     try:
-                        self._zip_dir(target_dir, zip_path)
-                        zip_files.append((zip_name, zip_path))
-                    except Exception as e:
-                        self.logger.exception(f"打包失败: {target_dir}")
-                        summary.append(f"  ⚠️ 打包失败: {e}")
+                        common = os.path.commonpath([download_root, abs_target])
+                    except ValueError:
+                        common = ""
+                    if common != download_root or abs_target == download_root:
+                        self.logger.warning(
+                            f"跳过打包（不在下载目录内）: {abs_target}"
+                        )
+                        summary.append("  ⚠️ 跳过打包: 目标目录不在下载目录内")
+                    else:
+                        zip_root = self._zip_root()
+                        zip_root.mkdir(parents=True, exist_ok=True)
+                        # 压缩包文件名只保留车号+时间戳+随机后缀，不含本子名称；
+                        # 时间戳/随机后缀保证不同任务、不同会话下载同一车号时
+                        # 不会互相覆盖同名 zip，避免发送错文件
+                        zip_name = (
+                            f"JM{entity_id}_{int(time.time())}"
+                            f"_{uuid.uuid4().hex[:8]}.zip"
+                        )
+                        zip_path = os.path.join(str(zip_root), zip_name)
+                        try:
+                            self._zip_dir(
+                                target_dir,
+                                zip_path,
+                                str(self._cfg("zip_password", "") or ""),
+                            )
+                            zip_files.append((zip_name, zip_path))
+                            zipped_dirs[zip_name] = target_dir
+                        except Exception as e:
+                            self.logger.exception(f"打包失败: {target_dir}")
+                            summary.append(f"  ⚠️ 打包失败: {e}")
 
             # 1. 先发送本子的压缩包
+            sent_zip_names: list[str] = []  # 已成功发送（含超时视为已送达）的压缩包
             if self._cfg("zip_after_download", True) and zip_files:
                 for zip_name, zip_path in zip_files:
                     if self._cfg("send_file", True):
@@ -648,6 +711,7 @@ class JmcomicPlugin(Star):
                         self._bump_platform_timeouts()
                         try:
                             await self.context.send_message(umo, file_chain)
+                            sent_zip_names.append(zip_name)
                         except Exception as e:
                             # 大文件上传超时（Timed out）时，文件往往已送达，
                             # 此时不发送“发送失败”的误导提示，仅记录日志。
@@ -655,6 +719,7 @@ class JmcomicPlugin(Star):
                                 self.logger.warning(
                                     f"压缩包发送超时（可能已送达）: {zip_name}, {e}"
                                 )
+                                sent_zip_names.append(zip_name)
                                 continue
                             self.logger.exception("发送压缩包失败")
                             await send_text(
@@ -662,6 +727,32 @@ class JmcomicPlugin(Star):
                             )
                     else:
                         await send_text(f"📦 压缩包路径: {zip_path}")
+
+            # 1.1 发送完成后删除原始下载文件（压缩包已发给用户，原图不再需要）。
+            #     只在压缩包确实发送成功（或超时视为已送达）时删除；
+            #     发送失败时保留原图，避免用户既没收到包也拿不到文件。
+            if sent_zip_names:
+                download_root = os.path.abspath(str(self._download_root()))
+                for zip_name in sent_zip_names:
+                    target_dir = zipped_dirs.get(zip_name)
+                    if not target_dir:
+                        continue
+                    abs_dir = os.path.abspath(target_dir)
+                    # 安全校验：只删除插件下载目录下的文件
+                    try:
+                        common = os.path.commonpath([download_root, abs_dir])
+                    except ValueError:
+                        continue
+                    if common != download_root or abs_dir == download_root:
+                        self.logger.warning(
+                            f"跳过删除（不在下载目录内）: {abs_dir}"
+                        )
+                        continue
+                    try:
+                        shutil.rmtree(abs_dir)
+                        self.logger.info(f"已删除发送后的原始下载目录: {abs_dir}")
+                    except Exception as e:
+                        self.logger.warning(f"删除原始下载目录失败: {abs_dir}: {e}")
 
             # 2. 引用回复发送者：下载完成
             reply_text = str(self._cfg("finish_reply", "你的本子下载完成，已发送给你"))
@@ -739,8 +830,8 @@ class JmcomicPlugin(Star):
         """查看 JMComic 插件帮助"""
         help_text = (
             "🛠 JMComic 插件使用说明\n"
-            "• /jm download <车号...> — 下载本子，支持多个车号，"
-            "章节号加 p 前缀，如: /jm download 123 p456\n"
+            "• /jm <车号...> — 下载本子，支持多个车号，"
+            "章节号加 p 前缀，如: /jm 123 或 /jm 123 p456\n"
             "• /jm info <车号> — 查看本子详情\n"
             "• /jm search <关键词> — 站内搜索\n"
             "• /jm status — 查看本会话下载任务\n"
@@ -753,9 +844,21 @@ class JmcomicPlugin(Star):
         )
         yield event.plain_result(help_text)
 
-    @jm.command("download", alias={"d", "dl", "下"})
-    async def download(self, event: AstrMessageEvent, ids: GreedyStr) -> None:
-        """下载本子/章节（后台执行，完成后发送文件）"""
+    @filter.regex(
+        r"(?i)^jm\s+(?!(?:help|info|search|status|cancel|report|"
+        r"download|d|dl|下|i|s|查看|搜|反馈|bug)\b)\S.*$"
+    )
+    async def download(self, event: AstrMessageEvent) -> None:
+        """默认下载：/jm <车号...>，例如 /jm 123、/jm 123 p456（后台执行）"""
+        # 正则过滤器不受 wake_prefix 制约，这里与标准指令保持一致：
+        # 只有通过唤醒（/jm、@机器人、私聊）的消息才处理。
+        if not getattr(event, "is_at_or_wake_command", False):
+            return
+
+        # 去掉 "jm" 前缀后按车号解析，例如 "123 p456" -> 本子 123 + 章节 456
+        raw = (getattr(event, "message_str", "") or "").strip()
+        ids = re.sub(r"^jm\s+", "", raw, flags=re.IGNORECASE).strip()
+
         if not self._check_permission(event):
             yield event.plain_result("⛔ 你没有权限使用下载功能（仅管理员可用，"
                                      "或到插件配置把 permission 改为 everyone）。")
@@ -775,7 +878,7 @@ class JmcomicPlugin(Star):
             return
 
         if not albums and not photos:
-            yield event.plain_result("❌ 没有识别到车号，示例: /jm download 123 p456")
+            yield event.plain_result("❌ 没有识别到车号，示例: /jm 123 或 /jm 123 p456")
             return
 
         session_key = event.unified_msg_origin

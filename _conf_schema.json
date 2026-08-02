@@ -62,6 +62,12 @@
     "type": "bool",
     "default": true
   },
+  "zip_password": {
+    "description": "zip 压缩包加密密码",
+    "hint": "留空不加密；设置后需安装 pyzipper（pip install pyzipper），未安装时自动退回普通 zip",
+    "type": "string",
+    "default": ""
+  },
   "send_file": {
     "description": "尝试发送 zip 文件",
     "hint": "部分平台不支持文件消息，关闭后仅返回保存路径",

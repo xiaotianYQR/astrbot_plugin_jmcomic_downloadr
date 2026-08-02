@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 import types
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +35,13 @@ def _module(name: str, **attrs) -> types.ModuleType:
 class FakeFilter:
     def __init__(self) -> None:
         self.registered = []
+
+    def regex(self, pattern, **kwargs):
+        def deco(fn):
+            self.registered.append(("regex", pattern, None, fn))
+            return fn
+
+        return deco
 
     def command(self, name, alias=None, **kwargs):
         def deco(fn):
@@ -70,14 +78,24 @@ class FakeCommandGroup:
 
 
 class FakeEvent:
-    def __init__(self, umo="session://test/1", admin=True) -> None:
+    def __init__(
+        self,
+        umo="session://test/1",
+        admin=True,
+        message_str="jm 123",
+    ) -> None:
         self.unified_msg_origin = umo
         self._admin = admin
+        self.message_str = message_str
+        self.is_at_or_wake_command = True
         self.message_obj = SimpleNamespace(message_id="msg123")
         self._stopped = False
 
     def stop_event(self) -> None:
         self._stopped = True
+
+    def get_message_str(self) -> str:
+        return self.message_str
 
     def is_stopped(self) -> bool:
         return self._stopped
@@ -163,6 +181,53 @@ _module(
     "astrbot.core.utils.astrbot_path",
     get_astrbot_plugin_data_path=lambda: "D:/fake/data/plugin_data",
 )
+
+
+class FakeAESZipFile:
+    """用标准库真实写 zip 的 pyzipper.AESZipFile 桩，并记录密码。"""
+
+    def __init__(self, mod, path, mode="w", compression=zipfile.ZIP_DEFLATED, encryption=99):
+        self._mod = mod
+        self._zf = zipfile.ZipFile(path, mode, compression)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._zf.close()
+        return False
+
+    def setpassword(self, password: bytes) -> None:
+        self._mod.last_password = password
+
+    def write(self, filename, arcname=None) -> None:
+        self._zf.write(filename, arcname)
+
+    def close(self) -> None:
+        self._zf.close()
+
+
+class FakePyzipper:
+    """pyzipper 桩模块：加密分支调用时记录密码，实际写入普通 zip。"""
+
+    ZIP_DEFLATED = zipfile.ZIP_DEFLATED
+    WZ_AES = 99
+
+    def __init__(self) -> None:
+        self.last_password: bytes | None = None
+
+    def AESZipFile(
+        self,
+        path,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        encryption=99,
+    ):
+        return FakeAESZipFile(self, path, mode, compression, encryption)
+
+
+fake_pyzipper = FakePyzipper()
+sys.modules["pyzipper"] = fake_pyzipper
 
 # ---------------------------------------------------------------------------
 # 2. 加载被测插件
@@ -346,8 +411,17 @@ async def main_test() -> None:
     print("== 指令注册 ==")
     names = [r[1] for r in filter_mod.registered]
     check("注册了 command_group jm", ("command_group", "jm", None) in [(r[0], r[1], r[2]) for r in filter_mod.registered])
-    for cmd in ("download", "info", "search", "status", "cancel", "help"):
+    for cmd in ("info", "search", "status", "cancel", "help"):
         check(f"注册了子指令 {cmd}", any(r[0] == "command" and r[1] == cmd for r in filter_mod.registered))
+    check(
+        "注册了默认下载入口（regex）",
+        any(
+            r[0] == "regex"
+            and r[1].startswith(r"(?i)^jm")
+            for r in filter_mod.registered
+        ),
+        str([r for r in filter_mod.registered if r[0] == "regex"]),
+    )
 
     print("== 配置与路径 ==")
     ctx = FakeContext()
@@ -431,6 +505,12 @@ async def main_test() -> None:
     check("search 返回结果", any("结果一" in r[1] for r in results))
 
     print("== 后台下载任务（进度/zip/文件消息） ==")
+    dl_album = tmp / "download" / "album"
+    dl_photo = tmp / "download" / "photo"
+    dl_album.mkdir(parents=True)
+    dl_photo.mkdir(parents=True)
+    (dl_album / "01.jpg").write_bytes(b"fake")
+    fake_jm_dl = FakeJm(str(dl_album), str(dl_photo))
     plugin_dl = main.JmcomicPlugin(
         ctx,
         {
@@ -439,7 +519,7 @@ async def main_test() -> None:
             "zip_dir": str(tmp / "zip"),
         },
     )
-    plugin_dl._jm = fake_jm
+    plugin_dl._jm = fake_jm_dl
     task = main.DownloadTask(
         task_id="t1",
         session_key="session://test/1",
@@ -450,7 +530,7 @@ async def main_test() -> None:
     )
     await plugin_dl._download_job(task, "session://test/1", ["123"], [])
     check("任务状态 done", task.status == "done", task.status)
-    check("fake_jm 收到 album 下载", fake_jm.downloaded == [("album", "123")], str(fake_jm.downloaded))
+    check("fake_jm 收到 album 下载", fake_jm_dl.downloaded == [("album", "123")], str(fake_jm_dl.downloaded))
     sent = plugin_dl.context.sent
     all_texts = " ".join(
         c[1] if isinstance(c, tuple) else "" for _, ch in sent for c in ch.chain
@@ -499,11 +579,23 @@ async def main_test() -> None:
     zip_root = Path(plugin_dl._zip_root())
     zips = list(zip_root.glob("*.zip"))
     check("生成了 zip", len(zips) == 1, str(zips))
-    check("zip 文件名只含ID不含标题", zips and zips[0].name == "JM123.zip", str(zips))
+    check(
+        "zip 文件名只含ID+时间戳不含标题",
+        zips and zips[0].name.startswith("JM123_") and zips[0].name.endswith(".zip"),
+        str(zips),
+    )
     check("zip 非空", zips and zips[0].stat().st_size > 0)
+    check("发送后已删除原始下载目录", not dl_album.exists(), str(dl_album))
+    check("压缩包仍然保留", zips and zips[0].exists(), str(zips))
 
-    print("== download 指令（成功启动不回复任何消息） ==")
+    print("== 默认下载指令 /jm 123（成功启动不回复任何消息） ==")
     ctx_h = FakeContext()
+    h_album = tmp / "h_dl" / "album"
+    h_photo = tmp / "h_dl" / "photo"
+    h_album.mkdir(parents=True)
+    h_photo.mkdir(parents=True)
+    (h_album / "01.jpg").write_bytes(b"fake")
+    fake_jm_h = FakeJm(str(h_album), str(h_photo))
     plugin_h = main.JmcomicPlugin(
         ctx_h,
         {
@@ -512,9 +604,9 @@ async def main_test() -> None:
             "zip_dir": str(tmp / "h_zip"),
         },
     )
-    plugin_h._jm = fake_jm
+    plugin_h._jm = fake_jm_h
     ev_h = FakeEvent()
-    results = [r async for r in plugin_h.download(ev_h, "123")]
+    results = [r async for r in plugin_h.download(ev_h)]
     check("成功启动不 yield 任何消息", results == [], str(results))
     check("事件已标记停止（阻止LLM回复）", ev_h.is_stopped())
     h_task = next(iter(plugin_h._tasks.values()))
@@ -527,6 +619,12 @@ async def main_test() -> None:
 
     print("== 重复指令去重 ==")
     ctx_dd = FakeContext()
+    dd_album = tmp / "dd_dl" / "album"
+    dd_photo = tmp / "dd_dl" / "photo"
+    dd_album.mkdir(parents=True)
+    dd_photo.mkdir(parents=True)
+    (dd_album / "01.jpg").write_bytes(b"fake")
+    fake_jm_dd = FakeJm(str(dd_album), str(dd_photo))
     plugin_dd = main.JmcomicPlugin(
         ctx_dd,
         {
@@ -535,22 +633,28 @@ async def main_test() -> None:
             "zip_dir": str(tmp / "dd_zip"),
         },
     )
-    plugin_dd._jm = fake_jm
-    _ = [r async for r in plugin_dd.download(FakeEvent(), "123")]
+    plugin_dd._jm = fake_jm_dd
+    _ = [r async for r in plugin_dd.download(FakeEvent())]
     check("第一个指令启动任务", len(plugin_dd._tasks) == 1, str(len(plugin_dd._tasks)))
     ev_dup = FakeEvent()
-    _ = [r async for r in plugin_dd.download(ev_dup, "123")]
+    _ = [r async for r in plugin_dd.download(ev_dup)]
     check("相同指令被去重", len(plugin_dd._tasks) == 1, str(len(plugin_dd._tasks)))
     check("重复指令事件已停止", ev_dup.is_stopped())
     dd_task = next(iter(plugin_dd._tasks.values()))
     await asyncio.wait_for(asyncio.shield(dd_task.asyncio_task), timeout=10)
-    _ = [r async for r in plugin_dd.download(FakeEvent(), "123")]
+    _ = [r async for r in plugin_dd.download(FakeEvent())]
     check("任务完成后可再次下载", len(plugin_dd._tasks) == 2, str(len(plugin_dd._tasks)))
 
     print("== 文件发送超时容错 ==")
     check("超时异常识别", main._looks_like_timeout(TimeoutError("Timed out")))
     check("非超时异常不误判", not main._looks_like_timeout(RuntimeError("连接被拒绝")))
     ctx_to = TimeoutFileContext()
+    to_album = tmp / "to_dl" / "album"
+    to_photo = tmp / "to_dl" / "photo"
+    to_album.mkdir(parents=True)
+    to_photo.mkdir(parents=True)
+    (to_album / "01.jpg").write_bytes(b"fake")
+    fake_jm_to = FakeJm(str(to_album), str(to_photo))
     plugin_to = main.JmcomicPlugin(
         ctx_to,
         {
@@ -559,7 +663,7 @@ async def main_test() -> None:
             "zip_dir": str(tmp / "to_zip"),
         },
     )
-    plugin_to._jm = fake_jm
+    plugin_to._jm = fake_jm_to
     to_task = main.DownloadTask(
         task_id="t3",
         session_key="session://test/1",
@@ -574,6 +678,108 @@ async def main_test() -> None:
     )
     check("超时不提示发送失败", "发送失败" not in to_texts, to_texts[:300])
     check("超时后仍回复完成", "你的本子下载完成" in to_texts, to_texts[:300])
+
+    print("== 加密 zip 打包（pyzipper） ==")
+    enc_album = tmp / "enc_dl" / "album"
+    enc_photo = tmp / "enc_dl" / "photo"
+    enc_album.mkdir(parents=True)
+    enc_photo.mkdir(parents=True)
+    (enc_album / "01.jpg").write_bytes(b"fake")
+    fake_jm_enc = FakeJm(str(enc_album), str(enc_photo))
+    ctx_enc = FakeContext()
+    plugin_enc = main.JmcomicPlugin(
+        ctx_enc,
+        {
+            **cfg,
+            "download_dir": str(tmp / "enc_dl"),
+            "zip_dir": str(tmp / "enc_zip"),
+            "zip_password": "secret123",
+        },
+    )
+    plugin_enc._jm = fake_jm_enc
+    enc_task = main.DownloadTask(
+        task_id="tenc",
+        session_key="session://test/enc",
+        albums=["123"],
+        photos=[],
+        created_at=0.0,
+        reply_message_id="12345",
+    )
+    await plugin_enc._download_job(enc_task, "session://test/enc", ["123"], [])
+    check(
+        "加密 zip 走 pyzipper 并设置密码",
+        fake_pyzipper.last_password == b"secret123",
+        repr(fake_pyzipper.last_password),
+    )
+    enc_zips = list(Path(plugin_enc._zip_root()).glob("*.zip"))
+    check("加密任务生成了 zip", len(enc_zips) == 1, str(enc_zips))
+    check("加密任务发送后原图已删除", not enc_album.exists(), str(enc_album))
+
+    print("== 同一车号重复打包不互相覆盖 ==")
+    conc_album = tmp / "conc_dl" / "album"
+    conc_photo = tmp / "conc_dl" / "photo"
+    conc_album.mkdir(parents=True)
+    conc_photo.mkdir(parents=True)
+    (conc_album / "01.jpg").write_bytes(b"fake")
+    ctx_c1 = FakeContext()
+    plugin_c1 = main.JmcomicPlugin(
+        ctx_c1,
+        {
+            **cfg,
+            "download_dir": str(tmp / "conc_dl"),
+            "zip_dir": str(tmp / "conc_zip"),
+        },
+    )
+    plugin_c1._jm = FakeJm(str(conc_album), str(conc_photo))
+    c1_task = main.DownloadTask(
+        task_id="c1",
+        session_key="session://test/c1",
+        albums=["123"],
+        photos=[],
+        created_at=0.0,
+        reply_message_id="12345",
+    )
+    await plugin_c1._download_job(c1_task, "session://test/c1", ["123"], [])
+    # 第一次任务发送后已删除原图，重建目录模拟第二次下载
+    conc_album.mkdir(parents=True)
+    (conc_album / "01.jpg").write_bytes(b"fake")
+    ctx_c2 = FakeContext()
+    plugin_c2 = main.JmcomicPlugin(
+        ctx_c2,
+        {
+            **cfg,
+            "download_dir": str(tmp / "conc_dl"),
+            "zip_dir": str(tmp / "conc_zip"),
+        },
+    )
+    plugin_c2._jm = FakeJm(str(conc_album), str(conc_photo))
+    c2_task = main.DownloadTask(
+        task_id="c2",
+        session_key="session://test/c2",
+        albums=["123"],
+        photos=[],
+        created_at=0.0,
+        reply_message_id="12345",
+    )
+    await plugin_c2._download_job(c2_task, "session://test/c2", ["123"], [])
+    conc_zips = list(Path(plugin_c1._zip_root()).glob("JM123_*.zip"))
+    check(
+        "同一车号两次打包生成两个独立 zip",
+        len(conc_zips) == 2,
+        str([z.name for z in conc_zips]),
+    )
+    check(
+        "两个 zip 文件名互不相同（无覆盖）",
+        len({z.name for z in conc_zips}) == 2,
+        str([z.name for z in conc_zips]),
+    )
+    for z in conc_zips:
+        with zipfile.ZipFile(z) as zf:
+            check(
+                "每个 zip 内容都只有自己的 01.jpg",
+                zf.namelist() == ["01.jpg"],
+                str(zf.namelist()),
+            )
 
     print("== 取消/状态 ==")
     plugin_dl._tasks["t1"] = task
