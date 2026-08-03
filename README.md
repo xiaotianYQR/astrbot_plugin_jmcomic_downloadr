@@ -1,25 +1,50 @@
 # JMComic 下载器
 
-**AstrBot 插件**，基于 [jmcomic (JMComic-Crawler-Python)](https://github.com/hect0x7/JMComic-Crawler-Python) 构建，提供禁漫本子的**下载、搜索、详情查询**能力——后台下载、自动打包，完成后直接发送 ZIP 压缩包。
+**AstrBot 插件**，基于 [jmcomic (JMComic-Crawler-Python)](https://github.com/hect0x7/JMComic-Crawler-Python) 构建，提供禁漫本子的**下载、搜索、详情查询**能力。指令发出后后台自动下载并打包，支持 **ZIP / PDF 双格式**发送，重复请求同一本子时**直接命中缓存秒发**。
 
-![版本](https://img.shields.io/badge/版本-v1.9.0-blue)
+![版本](https://img.shields.io/badge/版本-v1.12.0-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.13.0-brightgreen)
 ![许可](https://img.shields.io/badge/License-AGPL--3.0-orange)
 ![Stars](https://img.shields.io/github/stars/xiaotianYQR/astrbot_jmcomic_downloader)
 
 > ⚠️ **免责声明**：内容涉及成人向漫画，仅供学习交流，请遵守当地法律法规。同时注意不要对禁漫服务器造成过大压力（一次不要下载太多本子）。
 
+> **版权与许可 / Copyright and License**
+>
+> **作者 / Author**: xiaotianYQR
+>
+> **许可协议 / License**: 本项目采用 [**AGPL-3.0**](LICENSE) 开源协议，基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot)（同为 AGPL-3.0）插件框架开发，并调用 [jmcomic (JMComic-Crawler-Python)](https://github.com/hect0x7/JMComic-Crawler-Python) 作为核心下载库。基于本仓库的修改或衍生作品必须以相同协议分发。
+>
+> **License**: Licensed under [**AGPL-3.0**](LICENSE). Built on the [AstrBot](https://github.com/AstrBotDevs/AstrBot) plugin framework (also AGPL-3.0) and powered by [jmcomic (JMComic-Crawler-Python)](https://github.com/hect0x7/JMComic-Crawler-Python). Any modifications or derivative works must be distributed under the same license.
+
+> [!WARNING]
+> 本插件涉及成人向内容：请确认您所在地区与所在平台允许后再使用；下载内容请自行妥善保管，勿用于商业传播，遵守内容来源网站的使用规则。
+
+<details>
+<summary><strong>免责声明与用户协议</strong></summary>
+
+使用本项目即表示您已阅读、理解并同意以下条款：
+
+1. 本项目仅供学习、研究和合法用途使用，严禁用于任何违反当地法律法规、平台服务条款或侵犯他人权益的场景。
+2. 使用者应遵守内容来源网站的规则，不得对其服务器造成过大压力（如一次批量下载过多本子），由此导致的访问受限、封禁等后果由使用者自行承担。
+3. 本项目按"原样"提供，开发者不对数据丢失、打包文件损坏、账号或设备异常、平台风控或任何直接、间接损失承担责任。
+4. 因用户违规使用（如传播成人内容、用于商业用途）导致的法律纠纷，由用户自行承担全部责任。
+5. 本协议可能随项目更新而调整，继续使用即表示接受更新后的条款。
+
+</details>
+
 ## ✨ 功能特性
 
-- 🚀 **后台下载**：指令发出后立即返回，下载与打包在后台线程执行，全程主动推送进度
-- 📦 **自动打包发送**：下载完成自动生成 ZIP 或 PDF 打包文件并发送，格式可配置（二选一）
-- 🔐 **AES-256 加密打包文件**：ZIP 解压密码 / PDF 打开密码，加密文件在 QQ 等平台不易触发文件发送限制
+- 🚀 **后台下载**：指令发出后立即返回，下载与打包在后台执行，全程主动推送进度
+- 📦 **ZIP / PDF 双格式**：`pack_format` 二选一，PDF 把全部图片合成一册，随时切换
+- ⚡ **缓存秒发**：CSV 索引记录打包文件，重复请求同一本子直接发送，跳过下载
+- 🔐 **AES-256 加密**：ZIP 解压密码 / PDF 打开密码，加密文件在 QQ 等平台不易触发发送限制
 - 🧠 **车号智能解析**：`123`、`JM123`、完整 URL 均可，一次可下载多个本子与章节
-- 🔍 **详情与搜索**：`/jm info` 查看本子详情（标题/作者/标签/章节列表），`/jm search` 站内搜索
-- 📋 **任务管理**：`/jm status` 查看本会话任务，`/jm cancel` 取消下载
-- 💾 **磁盘缓存**：重复下载自动跳过已存在文件，取消任务不会丢失已下载内容
-- 📇 **本子缓存索引**：CSV 记录每个本子的首次下载/最近发送时间，重复请求直接发送已有打包文件，超过 24 小时无人请求自动删除
-- ⚙️ **高度可配置**：并发数、代理、图片解码、打包/发送行为、权限等均可调整
+- 🔍 **详情与搜索**：`/jm info` 查看本子详情（标题/作者/标签/章节），`/jm search` 站内搜索
+- 📋 **任务管理**：`/jm status` 查看任务，`/jm cancel` 取消下载
+- 💾 **磁盘缓存**：重复下载自动跳过已存在文件，取消任务不丢已下载内容
+- 🛡️ **平台适配**：Telegram / OneBot / QQ 官方机器人直接发送文件，其他平台主动提示
+- ⚙️ **高度可配置**：并发数、代理、图片解码、缓存策略、权限等均可调整
 
 ## 📖 目录
 
@@ -57,6 +82,8 @@ pip install jmcomic pyzipper pymupdf pillow
 
 > 💡 安装后在 WebUI 插件管理页点击插件「配置」，按需修改下载目录、代理、权限等。
 
+> 📱 支持直接发送打包文件的平台：**Telegram**、**OneBot（aiocqhttp）**、**QQ 官方机器人（websocket）**；其他平台会在下载前提示不支持。
+
 ## 🚀 快速开始
 
 | 指令 | 说明 |
@@ -76,13 +103,18 @@ pip install jmcomic pyzipper pymupdf pillow
 
 所有配置项在 WebUI 插件管理页 → 插件配置中修改：
 
+### 权限与搜索
+
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `permission` | string | `admin` | 命令权限：`admin`=仅管理员，`everyone`=所有人 |
+| `search_max` | int | `5` | 搜索结果显示的最大条数 |
+
+### 下载设置
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
 | `download_dir` | string | 空 | 下载保存目录，留空使用插件数据目录 |
-| `zip_dir` | string | 空 | ZIP 输出目录，留空使用插件数据目录 |
-| `pdf_dir` | string | 空 | PDF 输出目录（独立于 zip），留空使用插件数据目录 |
-| `pack_format` | string | `zip` | 发送文件格式，`zip`/`pdf` 二选一；`pdf`=所有图片合成一个 PDF（未安装 pymupdf 时自动回退 zip） |
 | `client_impl` | string | `api` | 客户端实现：`api`=APP 端（不限 IP），`html`=网页端（效率高） |
 | `image_decode` | bool | `true` | 还原禁漫的混淆图片 |
 | `image_suffix` | string | 空 | 图片格式转换（如 `.jpg`、`.png`，留空不转换） |
@@ -90,14 +122,26 @@ pip install jmcomic pyzipper pymupdf pillow
 | `photo_threads` | int | `0` | 同时下载章节数，`0`=按 CPU 核数自动 |
 | `retry_times` | int | `5` | 请求失败重试次数 |
 | `proxy` | string | 空 | 代理地址（如 `127.0.0.1:7890`），留空使用系统代理 |
+
+### 打包与发送
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `zip_dir` | string | 空 | ZIP 输出目录，留空使用插件数据目录 |
+| `pdf_dir` | string | 空 | PDF 输出目录（独立于 zip），留空使用插件数据目录 |
+| `pack_format` | string | `zip` | 发送格式：`zip`/`pdf` 二选一；`pdf`=所有图片合成一册（未安装 pymupdf 自动回退 zip） |
 | `pack_mode` | string | `csv_cache` | 打包文件处理模式：`csv_cache`=保留并用 CSV 索引缓存（重复请求直接发送，超时自动删除）；`delete_after_send`=发送后立即删除本地打包文件与原图目录 |
-| `zip_password` | string | 空 | 打包文件密码：zip 解压密码 / PDF 打开密码（AES-256 加密），留空不加密 |
+| `zip_password` | string | 空 | 打包文件密码：zip 解压密码 / PDF 打开密码（AES-256），留空不加密 |
 | `send_progress` | bool | `true` | 下载过程中发送进度消息 |
 | `max_concurrent` | int | `2` | 每个会话同时运行的最大下载任务数 |
-| `search_max` | int | `5` | 搜索结果显示的最大条数 |
 | `finish_reply` | string | `你的本子下载完成，已发送给你` | 下载完成后引用回复的文案 |
+
+### 缓存策略
+
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
 | `cache_ttl_hours` | int | `24` | 缓存过期时间（小时），距最近一次发送超过该时长即删除 |
-| `cache_cleanup_interval_minutes` | int | `30` | 后台缓存清理检查间隔（分钟），与缓存过期时间取较小值检查 |
+| `cache_cleanup_interval_minutes` | int | `30` | 后台缓存清理检查间隔（分钟），最小 1 分钟 |
 | `cache_delete_raw` | bool | `true` | 缓存过期时是否同时删除原图目录 |
 | `cache_csv_path` | string | 空 | 缓存索引 CSV 路径，留空使用默认 `cache_index.csv` |
 | `cache_hit_reply` | string | `✅ 命中缓存…` | 缓存命中回复文案，支持 `{id}` `{count}` `{first}` `{last}` 占位符 |
@@ -173,51 +217,49 @@ plugin_data/jmcomic_downloader/
 
 ### v1.12.0（2026-08-03）
 
-- 新增本子打包文件缓存：`cache_index.csv` 记录车号、文件路径、首次下载时间、最近发送时间与累计发送次数
-- 重复请求同一本子时直接发送已有打包文件，不再重复下载（支持多车号混查，命中部分直接发，未命中部分照常下载）
-- 超过 `cache_ttl_hours`（默认 24 小时）无人请求自动删除打包文件（可配置是否连同原图目录删除），后台定时清理
-- 启动时自动补录 `zip/`、`pdf/` 目录里已有的打包文件，旧文件也能立即被缓存复用
-- 新增 `pack_mode` 模式选项：`csv_cache`（默认，使用 CSV 索引缓存）/ `delete_after_send`（发送后立即删除本地打包文件与原图目录），取代原来的 `delete_zip_after_send` 开关
-- 修复定时清理：插件启动即挂起清理任务（无需等待新的下载指令）；文件删除失败（如被占用）会保留 CSV 记录并在下次清理时重试
-
-### v1.11.0（2026-08-03）
-
-- 移除 `send_file` 配置：不再提供“关闭后仅返回保存路径”的开关
-- 新增消息平台检测：仅支持 Telegram、OneBot、QQ 官方机器人（websocket）发送打包文件，其他平台会提示改用上述平台
-- 所有下发消息不再返回本地保存路径
-- 移除 `zip_after_download` 配置：下载完成后强制打包（zip/pdf）并发送，不再提供关闭开关
+- ✨ **新增 CSV 打包缓存索引**：`cache_index.csv` 记录车号、文件路径、首次下载/最近发送时间与累计发送次数
+- ⚡ **缓存秒发**：重复请求同一本子直接发送已有打包文件，跳过下载；多车号混查时命中部分直接发、未命中部分照常下载
+- 🗑️ **自动清理**：超过 `cache_ttl_hours`（默认 24h）无人请求自动删除打包文件，可配置是否连带删除原图目录
+- 🔁 **启动补录**：自动扫描 `zip/`、`pdf/` 目录已有文件写入索引，旧文件立即可复用
+- ⚙️ **新增 `pack_mode`**：`csv_cache`（默认）/ `delete_after_send` 二选一，取代原 `delete_zip_after_send` 开关
+- 🐛 **修复**：插件启动即挂起后台清理任务；文件删除失败（如被占用）保留记录并在下次清理时重试
 
 <details>
 <summary>📜 查看往期更新日志</summary>
 
+### v1.11.0（2026-08-03）
+
+- 🛡️ **新增平台检测**：仅 Telegram、OneBot（aiocqhttp）、QQ 官方机器人（websocket）支持发送打包文件，其他平台下载前即提示
+- 🗑️ **移除 `send_file`、`zip_after_download` 配置**：下载完成后强制打包（zip/pdf）并发送，不再提供关闭开关
+- 📝 所有下发消息不再返回本地保存路径
+
 ### v1.10.0（2026-08-03）
 
-- 新增 `pack_format` 配置：发送格式在 ZIP / PDF 二选一，PDF 把所有图片合成为一册
-- PDF 基于 PyMuPDF 实现（jpg/png 无损嵌入），webp 等格式自动经 Pillow 桥接解码
-- PDF 文件名与 ZIP 同规则（`JM<车号>.pdf`），支持 AES-256 打开密码加密
-- PDF 单独存放于 `pdf/` 目录，并新增独立配置 `pdf_dir`（与 `zip_dir` 分开）
-- PDF 生成过程静默执行，不再发送额外进度消息
-- 未安装 pymupdf 时自动回退发送 ZIP 并提示
+- ✨ **新增 PDF 打包**：`pack_format` 支持 `zip`/`pdf` 二选一，PDF 把所有图片合成为一册
+- 📄 PDF 基于 PyMuPDF 实现（jpg/png 无损嵌入），webp 等格式自动经 Pillow 桥接解码
+- 🔐 PDF 支持 AES-256 打开密码，文件名与 ZIP 同规则（`JM<车号>.pdf`）
+- 📁 PDF 单独存放于 `pdf/` 目录，新增独立配置 `pdf_dir`（与 `zip_dir` 分开）
+- 🔁 未安装 pymupdf 时自动回退发送 ZIP 并提示
 
 ### v1.9.0（2026-08-03）
 
-- 重构并美化 README：新增功能特性、配置项表格、常见问题、贡献者与致谢
-- 更新插件元数据与版本徽章
+- 📝 重构并美化 README：新增功能特性、配置项表格、常见问题、贡献者与致谢
+- 📝 更新插件元数据与版本徽章
 
 ### v1.6.0（2026-08-03）
 
-- 新增 ZIP 压缩包 AES-256 加密，支持配置解压密码（`zip_password`），加密包在 QQ 等平台不易触发文件发送限制
-- 新增加密依赖 pyzipper
-- 下载指令改为 `/jm` 直接调用并移除邮件反馈
-- 本子目录改为「车号-标题」，ZIP 内含顶层文件夹，解压即完整本子目录
-- 修复 ZIP 打包范围与并发消息重复问题
-- 优化回复信息与插件描述
+- ✨ 新增 ZIP 压缩包 AES-256 加密，支持配置解压密码（`zip_password`），加密包在 QQ 等平台不易触发文件发送限制
+- ✨ 新增 pyzipper 加密依赖
+- 🔄 下载指令改为 `/jm` 直接调用并移除邮件反馈
+- 📁 本子目录改为「车号-标题」，ZIP 内含顶层文件夹，解压即完整本子目录
+- 🐛 修复 ZIP 打包范围与并发消息重复问题
+- 📝 优化回复信息与插件描述
 
 ### v1.0.0（2026-08-02）
 
-- 首个正式版本：基于 jmcomic 的本子下载、搜索、详情查询
-- 后台下载并打包 ZIP 发送
-- 采用 AGPL-3.0 协议并补充 README
+- 🎉 首个正式版本：基于 jmcomic 的本子下载、搜索、详情查询
+- 📦 后台下载并打包 ZIP 发送
+- 📝 采用 AGPL-3.0 协议并补充 README
 
 </details>
 
