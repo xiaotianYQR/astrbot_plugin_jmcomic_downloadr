@@ -4,7 +4,7 @@ JMComic 下载插件 (astrbot_plugin_jmcomic)
 
 基于 jmcomic (JMComic-Crawler-Python) 的 AstrBot 插件，提供：
 
-- /jm <车号...>            后台下载本子/章节，完成后打包 zip 发送
+- /jm <车号...>            后台下载本子/章节，完成后打包 zip/pdf 发送
 - /jm info <车号>          查看本子详情（不下载）
 - /jm search <关键词>      站内搜索
 - /jm status               查看本会话的后台下载任务
@@ -14,7 +14,7 @@ JMComic 下载插件 (astrbot_plugin_jmcomic)
 说明：
 - 车号支持任意文本，例如 123、JM123、https://18comic.vip/album/123/；
   章节号以 p 开头，例如 p456。
-- 下载任务在后台运行，完成后会主动推送压缩包（部分平台不支持文件消息，
+- 下载任务在后台运行，完成后会主动推送 zip/pdf 打包文件（部分平台不支持文件消息，
   会退回发送保存路径文本）。
 - 数据默认存放在 AstrBot 的 data/plugin_data/jmcomic_downloader/ 下，
   可通过插件配置修改。
@@ -23,6 +23,7 @@ JMComic 下载插件 (astrbot_plugin_jmcomic)
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 import re
@@ -32,6 +33,17 @@ try:
     import pyzipper
 except Exception:  # pragma: no cover - 可选依赖，未安装时仅加密功能不可用
     pyzipper = None  # type: ignore
+try:
+    import pymupdf as fitz
+except Exception:  # pragma: no cover - 可选依赖，未安装时 PDF 功能不可用
+    try:
+        import fitz  # type: ignore
+    except Exception:  # pragma: no cover
+        fitz = None  # type: ignore
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - 可选依赖，用于解码 webp 等 MuPDF 不支持的图片
+    Image = None  # type: ignore
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -56,6 +68,9 @@ JM_LOGGER_NAME = "jmcomic"
 PLUGIN_DATA_DIR = "jmcomic_downloader"
 DEFAULT_DOWNLOAD_SUBDIR = "download"
 ZIP_SUBDIR = "zip"
+PDF_SUBDIR = "pdf"
+PDF_BRIDGE_JPEG_QUALITY = 90  # webp 等图片经 Pillow 桥接转为 JPEG 的质量
+PACK_FORMATS = ("zip", "pdf")  # 发送文件格式，二选一
 
 # 需要转发给用户的 jmcomic 日志 topic
 PROGRESS_TOPICS = {
@@ -169,6 +184,18 @@ def _safe_filename(text: str, max_len: int = 60) -> str:
     return text[:max_len] or "untitled"
 
 
+def _natural_key(path: str) -> list:
+    """按路径中的数字段自然排序：保证 2 排在 10 前面、02 章排在 10 章前面。"""
+    parts: list = []
+    for seg in path.split("/"):
+        for chunk in re.split(r"(\d+)", seg):
+            if chunk.isdigit():
+                parts.append((1, int(chunk)))
+            elif chunk:
+                parts.append((0, chunk))
+    return parts
+
+
 def _album_folder_name(album) -> str:
     """生成本子文件夹名：车号-标题，如 12345-我是本子。"""
     title = getattr(album, "title", "") or getattr(album, "name", "") or ""
@@ -250,11 +277,19 @@ class JmcomicPlugin(Star):
             return Path(os.path.abspath(os.path.expanduser(str(custom))))
         return Path(get_astrbot_plugin_data_path()) / PLUGIN_DATA_DIR / DEFAULT_DOWNLOAD_SUBDIR
 
-    def _zip_root(self) -> Path:
+    def _pack_root(self) -> Path:
+        """ZIP 输出目录；配置键为 zip_dir。"""
         custom = self._cfg("zip_dir", "")
         if custom:
             return Path(os.path.abspath(os.path.expanduser(str(custom))))
         return Path(get_astrbot_plugin_data_path()) / PLUGIN_DATA_DIR / ZIP_SUBDIR
+
+    def _pdf_root(self) -> Path:
+        """PDF 输出目录，与 ZIP 分开存放；配置键为 pdf_dir。"""
+        custom = self._cfg("pdf_dir", "")
+        if custom:
+            return Path(os.path.abspath(os.path.expanduser(str(custom))))
+        return Path(get_astrbot_plugin_data_path()) / PLUGIN_DATA_DIR / PDF_SUBDIR
 
     def _check_permission(self, event: AstrMessageEvent) -> bool:
         mode = self._cfg("permission", "admin")
@@ -396,6 +431,88 @@ class JmcomicPlugin(Star):
                     arc = os.path.join(arc_root, rel) if arc_root else rel
                     zf.write(full, arc.replace("\\", "/"))
 
+    def _pdf_dir(
+        self, src_dir: str, pdf_path: str, password: str = ""
+    ) -> tuple[int, int]:
+        """把文件夹内的所有图片按章节/页序合成为一个 PDF。
+
+        优先用 PyMuPDF 直接读取图片（jpg/png 无损嵌入）；
+        webp 等 MuPDF 不支持的格式先用 Pillow 解码成 JPEG 字节再交给 PyMuPDF。
+        password 非空时使用 AES-256 加密（PDF 打开密码）。
+        返回 (成功页数, 失败页数)。
+        """
+        if fitz is None:
+            raise RuntimeError(
+                "未安装 pymupdf，无法生成 PDF，请执行 pip install pymupdf"
+            )
+
+        src_dir = os.path.abspath(src_dir)
+        image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+        images: list[str] = []
+        for root, _, files in os.walk(src_dir):
+            for name in files:
+                if os.path.splitext(name)[1].lower() in image_exts:
+                    images.append(os.path.join(root, name))
+        if not images:
+            raise RuntimeError("未找到图片文件，无法生成 PDF")
+        images.sort(
+            key=lambda p: _natural_key(
+                os.path.relpath(p, src_dir).replace("\\", "/")
+            )
+        )
+
+        password = (password or "").strip()
+        doc = fitz.open()
+        ok = 0
+        failed = 0
+        try:
+            for full in images:
+                try:
+                    try:
+                        img = fitz.open(full)
+                    except Exception:
+                        # MuPDF 不支持的格式（如 webp）：Pillow 解码后转 JPEG 字节
+                        if Image is None:
+                            raise RuntimeError(
+                                "未安装 Pillow，无法解码图片，请执行 pip install pillow"
+                            )
+                        im = Image.open(full)
+                        if im.mode != "RGB":
+                            im = im.convert("RGB")
+                        buf = io.BytesIO()
+                        im.save(
+                            buf,
+                            "JPEG",
+                            quality=PDF_BRIDGE_JPEG_QUALITY,
+                        )
+                        img = fitz.open(stream=buf.getvalue(), filetype="jpeg")
+                    pdfbytes = img.convert_to_pdf()
+                    img.close()
+                    sub = fitz.open("pdf", pdfbytes)
+                    doc.insert_pdf(sub)
+                    sub.close()
+                    ok += 1
+                except Exception:
+                    if Image is None:
+                        raise  # Pillow 缺失属于环境问题，直接上报而不是跳过
+                    failed += 1
+                    continue
+            if ok == 0:
+                raise RuntimeError("所有图片均无法写入 PDF")
+            if password:
+                doc.save(
+                    pdf_path,
+                    encryption=fitz.PDF_ENCRYPT_AES_256,
+                    owner_pw=password,
+                    user_pw=password,
+                    permissions=fitz.PDF_PERM_ACCESSIBILITY,
+                )
+            else:
+                doc.save(pdf_path)
+        finally:
+            doc.close()
+        return ok, failed
+
     # ------------------------------------------------------------------
     # 后台任务（异步）
     # ------------------------------------------------------------------
@@ -503,12 +620,28 @@ class JmcomicPlugin(Star):
             results = future.result()
             task.results = results
 
-            # 逐条处理：统计成功/失败，打包 zip
+            # 逐条处理：统计成功/失败，按配置格式打包（zip/pdf 二选一）
             summary: list[str] = []
             failed_any = False
-            zip_files: list[tuple[str, str]] = []  # (name, abs path)
+            pack_files: list[tuple[str, str]] = []  # (name, abs path)
             zip_password = str(self._cfg("zip_password", "") or "").strip()
-            pwd_hint = f"\n🔑 解压密码: {zip_password}" if zip_password else ""
+            pack_format = str(self._cfg("pack_format", "zip") or "zip").lower()
+            if pack_format not in PACK_FORMATS:
+                pack_format = "zip"
+            if (
+                pack_format == "pdf"
+                and fitz is None
+                and self._cfg("zip_after_download", True)
+            ):
+                await send_text(
+                    "⚠️ 未安装 pymupdf，无法生成 PDF，本次已自动回退为发送 ZIP"
+                    "（请执行 pip install pymupdf）"
+                )
+                pack_format = "zip"
+            pwd_hint = ""
+            if zip_password:
+                label = "打开密码" if pack_format == "pdf" else "解压密码"
+                pwd_hint = f"\n🔑 {label}: {zip_password}"
             for kind, ret in results:
                 dler = ret.downloader
                 target_dir = self._result_target_dir(option, kind, ret)
@@ -530,29 +663,44 @@ class JmcomicPlugin(Star):
                 )
 
                 if self._cfg("zip_after_download", True) and os.path.isdir(target_dir):
-                    zip_root = self._zip_root()
-                    zip_root.mkdir(parents=True, exist_ok=True)
-                    # 压缩包文件名只保留车号，不包含本子名称
-                    zip_name = f"JM{entity_id}.zip"
-                    zip_path = os.path.join(str(zip_root), zip_name)
+                    pack_root = (
+                        self._pdf_root()
+                        if pack_format == "pdf"
+                        else self._pack_root()
+                    )
+                    pack_root.mkdir(parents=True, exist_ok=True)
+                    # 打包文件名只保留车号，不包含本子名称（zip/pdf 命名规则一致）
+                    pack_name = f"JM{entity_id}.{pack_format}"
+                    pack_path = os.path.join(str(pack_root), pack_name)
                     try:
-                        # zip 内顶层目录 = 本子文件夹（车号-标题），
-                        # 单章下载时保留 车号-标题/章节序号 的层级
-                        arc_root = os.path.relpath(
-                            target_dir, self._download_root()
-                        )
-                        self._zip_dir(target_dir, zip_path, arc_root, zip_password)
-                        zip_files.append((zip_name, zip_path))
+                        if pack_format == "pdf":
+                            _, failed_pages = self._pdf_dir(
+                                target_dir, pack_path, zip_password
+                            )
+                            if failed_pages:
+                                summary.append(
+                                    f"  ⚠️ {failed_pages} 张图片未能写入 PDF"
+                                )
+                        else:
+                            # zip 内顶层目录 = 本子文件夹（车号-标题），
+                            # 单章下载时保留 车号-标题/章节序号 的层级
+                            arc_root = os.path.relpath(
+                                target_dir, self._download_root()
+                            )
+                            self._zip_dir(
+                                target_dir, pack_path, arc_root, zip_password
+                            )
+                        pack_files.append((pack_name, pack_path))
                     except Exception as e:
                         self.logger.exception(f"打包失败: {target_dir}")
                         summary.append(f"  ⚠️ 打包失败: {e}")
 
-            # 1. 先发送本子的压缩包
-            if self._cfg("zip_after_download", True) and zip_files:
-                for zip_name, zip_path in zip_files:
+            # 1. 先发送本子的打包文件
+            if self._cfg("zip_after_download", True) and pack_files:
+                for pack_name, pack_path in pack_files:
                     if self._cfg("send_file", True):
                         file_chain = MessageChain()
-                        file_chain.chain.append(File(name=zip_name, file=zip_path))
+                        file_chain.chain.append(File(name=pack_name, file=pack_path))
                         self._bump_platform_timeouts()
                         try:
                             await self.context.send_message(umo, file_chain)
@@ -561,15 +709,15 @@ class JmcomicPlugin(Star):
                             # 此时不发送“发送失败”的误导提示，仅记录日志。
                             if _looks_like_timeout(e):
                                 self.logger.warning(
-                                    f"压缩包发送超时（可能已送达）: {zip_name}, {e}"
+                                    f"打包文件发送超时（可能已送达）: {pack_name}, {e}"
                                 )
                                 continue
-                            self.logger.exception("发送压缩包失败")
+                            self.logger.exception("发送打包文件失败")
                             await send_text(
-                                f"📦 压缩包已生成，但发送失败: {e}\n路径: {zip_path}{pwd_hint}"
+                                f"📦 打包文件已生成，但发送失败: {e}\n路径: {pack_path}{pwd_hint}"
                             )
                     else:
-                        await send_text(f"📦 压缩包路径: {zip_path}{pwd_hint}")
+                        await send_text(f"📦 打包文件路径: {pack_path}{pwd_hint}")
 
             # 2. 引用回复发送者：下载完成
             reply_text = str(self._cfg("finish_reply", "你的本子下载完成，已发送给你"))
@@ -580,16 +728,17 @@ class JmcomicPlugin(Star):
                 if str(mid).isdigit():
                     mid = int(mid)
                 reply_chain.chain.append(Reply(id=mid))
-            if zip_files and zip_password:
-                # 完成文案与解压密码合并为同一条文本，保证出现在同一条引用回复中
-                reply_chain.message(f"✅ {reply_text}\n🔑 解压密码: {zip_password}")
+            if pack_files and zip_password:
+                hint_label = "打开密码" if pack_format == "pdf" else "解压密码"
+                # 完成文案与密码合并为同一条文本，保证出现在同一条引用回复中
+                reply_chain.message(f"✅ {reply_text}\n🔑 {hint_label}: {zip_password}")
             else:
                 reply_chain.message(f"✅ {reply_text}")
             if failed_any:
                 reply_chain.message(
                     "⚠️ 部分内容下载失败，可重试下载（已缓存图片会跳过）。"
                 )
-            if not (self._cfg("zip_after_download", True) and zip_files):
+            if not (self._cfg("zip_after_download", True) and pack_files):
                 reply_chain.message("📁 文件保存在: " + str(self._download_root()))
             try:
                 await self.context.send_message(umo, reply_chain)
@@ -600,11 +749,11 @@ class JmcomicPlugin(Star):
                     f"（消息发送失败: {e}）"
                 )
 
-            # 可选：发送后删除 zip
+            # 可选：发送后删除打包文件（zip/pdf）
             if self._cfg("delete_zip_after_send", False):
-                for _, zip_path in zip_files:
+                for _, pack_path in pack_files:
                     try:
-                        os.remove(zip_path)
+                        os.remove(pack_path)
                     except OSError:
                         pass
 
@@ -679,7 +828,7 @@ class JmcomicPlugin(Star):
             "• /jm cancel <任务id> — 取消下载任务\n"
             "车号支持直接粘贴文本/链接，如 JM350234、"
             "https://18comic.vip/album/350234/\n"
-            "下载完成后机器人会主动发送压缩包（部分平台不支持文件消息）。"
+            "下载完成后机器人会主动发送打包文件 zip/pdf（部分平台不支持文件消息）。"
         )
         yield event.plain_result(help_text)
 

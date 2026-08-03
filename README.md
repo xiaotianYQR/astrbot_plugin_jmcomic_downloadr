@@ -12,8 +12,8 @@
 ## ✨ 功能特性
 
 - 🚀 **后台下载**：指令发出后立即返回，下载与打包在后台线程执行，全程主动推送进度
-- 📦 **自动打包发送**：下载完成自动生成 ZIP 压缩包并发送，省去手动整理
-- 🔐 **AES-256 加密压缩包**：可选解压密码，加密压缩包在 QQ 等平台不易触发文件发送限制
+- 📦 **自动打包发送**：下载完成自动生成 ZIP 或 PDF 打包文件并发送，格式可配置（二选一）
+- 🔐 **AES-256 加密打包文件**：ZIP 解压密码 / PDF 打开密码，加密文件在 QQ 等平台不易触发文件发送限制
 - 🧠 **车号智能解析**：`123`、`JM123`、完整 URL 均可，一次可下载多个本子与章节
 - 🔍 **详情与搜索**：`/jm info` 查看本子详情（标题/作者/标签/章节列表），`/jm search` 站内搜索
 - 📋 **任务管理**：`/jm status` 查看本会话任务，`/jm cancel` 取消下载
@@ -48,10 +48,10 @@ https://github.com/xiaotianYQR/astrbot_jmcomic_downloader
 
 1. 将本插件目录放到 AstrBot 的 `data/plugins/` 下（目录名为 `jmcomic_downloader`）
 2. 重启 AstrBot，或到 WebUI 插件管理页加载插件
-3. 依赖 `jmcomic`、`pyzipper` 会在加载时自动安装，也可手动执行：
+3. 依赖 `jmcomic`、`pyzipper`、`pymupdf`（PDF 打包）、`pillow`（webp 桥接）会在加载时自动安装，也可手动执行：
 
 ```bash
-pip install jmcomic pyzipper
+pip install jmcomic pyzipper pymupdf pillow
 ```
 
 > 💡 安装后在 WebUI 插件管理页点击插件「配置」，按需修改下载目录、代理、权限等。
@@ -60,7 +60,7 @@ pip install jmcomic pyzipper
 
 | 指令 | 说明 |
 | --- | --- |
-| `/jm 123` | 下载本子 123（后台执行，完成后发送 ZIP） |
+| `/jm 123` | 下载本子 123（后台执行，完成后发送 ZIP/PDF） |
 | `/jm 123 456` | 一次下载多个本子 |
 | `/jm 123 p456` | 同时下载本子 123 和章节 456 |
 | `/jm info 123` | 查看本子详情，不下载（别名：`i`、`查看`） |
@@ -80,6 +80,8 @@ pip install jmcomic pyzipper
 | `permission` | string | `admin` | 命令权限：`admin`=仅管理员，`everyone`=所有人 |
 | `download_dir` | string | 空 | 下载保存目录，留空使用插件数据目录 |
 | `zip_dir` | string | 空 | ZIP 输出目录，留空使用插件数据目录 |
+| `pdf_dir` | string | 空 | PDF 输出目录（独立于 zip），留空使用插件数据目录 |
+| `pack_format` | string | `zip` | 发送文件格式，`zip`/`pdf` 二选一；`pdf`=所有图片合成一个 PDF（未安装 pymupdf 时自动回退 zip） |
 | `client_impl` | string | `api` | 客户端实现：`api`=APP 端（不限 IP），`html`=网页端（效率高） |
 | `image_decode` | bool | `true` | 还原禁漫的混淆图片 |
 | `image_suffix` | string | 空 | 图片格式转换（如 `.jpg`、`.png`，留空不转换） |
@@ -87,10 +89,10 @@ pip install jmcomic pyzipper
 | `photo_threads` | int | `0` | 同时下载章节数，`0`=按 CPU 核数自动 |
 | `retry_times` | int | `5` | 请求失败重试次数 |
 | `proxy` | string | 空 | 代理地址（如 `127.0.0.1:7890`），留空使用系统代理 |
-| `zip_after_download` | bool | `true` | 下载完成后打包为 ZIP |
-| `send_file` | bool | `true` | 尝试发送 ZIP 文件，关闭后仅返回保存路径 |
-| `delete_zip_after_send` | bool | `false` | 发送后删除本地 ZIP |
-| `zip_password` | string | 空 | 压缩包解压密码（AES-256 加密），留空不加密 |
+| `zip_after_download` | bool | `true` | 下载完成后打包（zip/pdf）并发送 |
+| `send_file` | bool | `true` | 尝试发送打包文件，关闭后仅返回保存路径 |
+| `delete_zip_after_send` | bool | `false` | 发送后删除本地打包文件（zip/pdf） |
+| `zip_password` | string | 空 | 打包文件密码：zip 解压密码 / PDF 打开密码（AES-256 加密），留空不加密 |
 | `send_progress` | bool | `true` | 下载过程中发送进度消息 |
 | `max_concurrent` | int | `2` | 每个会话同时运行的最大下载任务数 |
 | `search_max` | int | `5` | 搜索结果显示的最大条数 |
@@ -108,17 +110,19 @@ plugin_data/jmcomic_downloader/
 │       │   └── 00001.jpg
 │       └── 2/
 │           └── 00001.jpg
-└── zip/
-    └── JM12345.zip              # 压缩包文件名只保留车号
+├── zip/
+│   └── JM12345.zip              # zip 打包文件名只保留车号
+└── pdf/
+    └── JM12345.pdf              # pdf 单独存放，命名规则与 zip 一致
 ```
 
-> 每个本子独立一个文件夹；打包时只包含该本子。ZIP 内部以 `车号-本子名称/` 作为顶层目录，解压后即是一个完整的本子文件夹。
+> 每个本子独立一个文件夹；打包时只包含该本子。ZIP 内部以 `车号-本子名称/` 作为顶层目录，解压后即是一个完整的本子文件夹；PDF 则把所有图片按章节/页序合成为一册，打开密码与 ZIP 解压密码同源（`zip_password`）。
 
 ## 📚 使用流程
 
 1. 发送 `/jm 335492`（不回复任何消息）
 2. 获取到本子后，机器人提示 `✅ 本子获取成功: JM335492 📥 开始下载…`
-3. 下载完成后，机器人提示 `✅ 本子下载完成: JM335492`，然后**直接发送本子的压缩包**（无多余文字）
+3. 下载完成后，机器人提示 `✅ 本子下载完成: JM335492`，然后**直接发送本子的打包文件（zip/pdf）**（无多余文字）
 4. 最后**引用回复**发送者：`✅ 你的本子下载完成，已发送给你`
 5. 如果下载出错，机器人会提示 `❌ 下载错误，请重试或联系管理员`
 
@@ -132,13 +136,17 @@ plugin_data/jmcomic_downloader/
 
 默认 `permission: admin` 仅管理员可用。可将配置改为 `everyone`，或在平台适配器配置中设置管理员（如 aiocqhttp 的 `admin_id`）。
 
-**Q：收不到压缩包？**
+**Q：收不到打包文件？**
 
 部分平台不支持文件消息，插件会退回发送文件保存路径；也可将 `send_file` 配置为 `false`，只返回路径。
 
-**Q：解压需要密码？**
+**Q：文件需要密码？**
 
-配置 `zip_password` 后压缩包使用 AES-256 加密，发送时会在引用回复中附带解压密码；不需要加密留空即可。
+配置 `zip_password` 后，ZIP 使用 AES-256 加密、PDF 设置打开密码，发送时会在引用回复中附带密码；不需要加密留空即可。
+
+**Q：PDF 生成失败或提示未安装 pymupdf？**
+
+执行 `pip install pymupdf pillow` 后重启 AstrBot。未安装 pymupdf 时插件会自动回退发送 ZIP；`pillow` 用于解码 webp 等图片，缺了它包含 webp 的本子无法生成 PDF。
 
 **Q：下载很慢或经常失败？**
 
@@ -153,6 +161,15 @@ plugin_data/jmcomic_downloader/
 插件会自动调大 Telegram 等平台的文件上传超时；若仍失败，请检查网络或改用 `send_file: false` 获取本地路径。
 
 ## 📝 更新日志
+
+### v1.10.0（2026-08-03）
+
+- 新增 `pack_format` 配置：发送格式在 ZIP / PDF 二选一，PDF 把所有图片合成为一册
+- PDF 基于 PyMuPDF 实现（jpg/png 无损嵌入），webp 等格式自动经 Pillow 桥接解码
+- PDF 文件名与 ZIP 同规则（`JM<车号>.pdf`），支持 AES-256 打开密码加密
+- PDF 单独存放于 `pdf/` 目录，并新增独立配置 `pdf_dir`（与 `zip_dir` 分开）
+- PDF 生成过程静默执行，不再发送额外进度消息
+- 未安装 pymupdf 时自动回退发送 ZIP 并提示
 
 ### v1.9.0（2026-08-03）
 
@@ -196,5 +213,6 @@ plugin_data/jmcomic_downloader/
 - [AstrBot](https://github.com/AstrBotDevs/AstrBot) - 机器人框架
 - [JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python) - JMComic 库
 - [pyzipper](https://github.com/danifus/pyzipper) - 加密 ZIP 库
+- [PyMuPDF](https://github.com/pymupdf/PyMuPDF) - PDF 打包库
 
 ⭐ 如果这个插件对你有帮助，欢迎给个 Star！

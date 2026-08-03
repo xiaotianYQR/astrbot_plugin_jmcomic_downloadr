@@ -17,6 +17,19 @@
     "type": "string",
     "default": ""
   },
+  "pdf_dir": {
+    "description": "PDF 输出目录（与 zip 分开存放）",
+    "hint": "留空则使用 plugin_data/jmcomic_downloader/pdf",
+    "type": "string",
+    "default": ""
+  },
+  "pack_format": {
+    "description": "发送文件格式（zip 和 pdf 二选一）",
+    "hint": "zip=压缩包（保留目录结构）；pdf=把所有图片合成为一个 PDF，文件名与 zip 规则一致；未安装 pymupdf 时自动回退为 zip",
+    "type": "string",
+    "default": "zip",
+    "options": ["zip", "pdf"]
+  },
   "client_impl": {
     "description": "客户端实现",
     "hint": "api=APP端，不限IP兼容性好；html=网页端，效率高但限制IP地区",
@@ -58,24 +71,24 @@
     "default": ""
   },
   "zip_after_download": {
-    "description": "下载完成后打包为 zip 发送",
+    "description": "下载完成后打包（zip/pdf）并发送",
     "type": "bool",
     "default": true
   },
   "send_file": {
-    "description": "尝试发送 zip 文件",
+    "description": "尝试发送打包文件（zip/pdf）",
     "hint": "部分平台不支持文件消息，关闭后仅返回保存路径",
     "type": "bool",
     "default": true
   },
   "delete_zip_after_send": {
-    "description": "发送后删除本地 zip 压缩包",
+    "description": "发送后删除本地打包文件（zip/pdf）",
     "type": "bool",
     "default": false
   },
   "zip_password": {
-    "description": "压缩包解压密码（AES-256 加密）",
-    "hint": "留空不加密；填写后发送的本子 zip 使用该密码 AES-256 加密，可降低 QQ 等平台的文件发送限制风险",
+    "description": "打包文件密码（zip 解压 / PDF 打开，AES-256 加密）",
+    "hint": "留空不加密；填写后发送的 zip 使用该密码 AES-256 加密、PDF 使用该密码作为打开密码，可降低 QQ 等平台的文件发送限制风险",
     "type": "string",
     "default": ""
   },

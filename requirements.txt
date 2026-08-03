@@ -1,2 +1,4 @@
 jmcomic>=2.6.0
 pyzipper>=0.3.6
+pymupdf>=1.23.0
+pillow>=10.0.0
