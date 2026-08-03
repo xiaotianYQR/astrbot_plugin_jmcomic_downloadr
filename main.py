@@ -14,8 +14,8 @@ JMComic 下载插件 (astrbot_plugin_jmcomic)
 说明：
 - 车号支持任意文本，例如 123、JM123、https://18comic.vip/album/123/；
   章节号以 p 开头，例如 p456。
-- 下载任务在后台运行，完成后会主动推送 zip/pdf 打包文件（部分平台不支持文件消息，
-  会退回发送保存路径文本）。
+- 下载任务在后台运行，完成后会主动推送 zip/pdf 打包文件（仅支持 Telegram、
+  OneBot、QQ 官方机器人（websocket）平台，其他平台会提示不支持）。
 - 数据默认存放在 AstrBot 的 data/plugin_data/jmcomic_downloader/ 下，
   可通过插件配置修改。
 """
@@ -71,6 +71,28 @@ ZIP_SUBDIR = "zip"
 PDF_SUBDIR = "pdf"
 PDF_BRIDGE_JPEG_QUALITY = 90  # webp 等图片经 Pillow 桥接转为 JPEG 的质量
 PACK_FORMATS = ("zip", "pdf")  # 发送文件格式，二选一
+
+# 支持直接发送文件消息的平台类型（AstrBot 平台适配器注册名）
+FILE_SEND_PLATFORMS = ("telegram", "aiocqhttp", "qq_official", "qqofficial")
+
+
+def _platform_supports_file(platform_name: str) -> bool:
+    """当前平台是否支持发送文件消息（仅 Telegram / OneBot / QQ 官方机器人 websocket）。"""
+    name = (platform_name or "").replace("_", "").replace("-", "").lower()
+    return name in {
+        p.replace("_", "").replace("-", "").lower() for p in FILE_SEND_PLATFORMS
+    }
+
+
+def _event_platform_name(event: Any) -> str:
+    """获取消息事件所属平台类型名（如 telegram / aiocqhttp / qq_official）。"""
+    getter = getattr(event, "get_platform_name", None)
+    if callable(getter):
+        try:
+            return str(getter() or "")
+        except Exception:
+            pass
+    return str(getattr(getattr(event, "platform", None), "name", "") or "")
 
 # 需要转发给用户的 jmcomic 日志 topic
 PROGRESS_TOPICS = {
@@ -174,6 +196,7 @@ class DownloadTask:
     fetched_album_id: str = ""
     fetched_title: str = ""
     reply_message_id: str = ""
+    platform_name: str = ""
     dedup_key: tuple = ()
 
 
@@ -628,11 +651,7 @@ class JmcomicPlugin(Star):
             pack_format = str(self._cfg("pack_format", "zip") or "zip").lower()
             if pack_format not in PACK_FORMATS:
                 pack_format = "zip"
-            if (
-                pack_format == "pdf"
-                and fitz is None
-                and self._cfg("zip_after_download", True)
-            ):
+            if pack_format == "pdf" and fitz is None:
                 await send_text(
                     "⚠️ 未安装 pymupdf，无法生成 PDF，本次已自动回退为发送 ZIP"
                     "（请执行 pip install pymupdf）"
@@ -662,7 +681,7 @@ class JmcomicPlugin(Star):
                     f"({photo_count} 个章节，失败 {failed_count} 张)"
                 )
 
-                if self._cfg("zip_after_download", True) and os.path.isdir(target_dir):
+                if os.path.isdir(target_dir):
                     pack_root = (
                         self._pdf_root()
                         if pack_format == "pdf"
@@ -695,10 +714,15 @@ class JmcomicPlugin(Star):
                         self.logger.exception(f"打包失败: {target_dir}")
                         summary.append(f"  ⚠️ 打包失败: {e}")
 
-            # 1. 先发送本子的打包文件
-            if self._cfg("zip_after_download", True) and pack_files:
-                for pack_name, pack_path in pack_files:
-                    if self._cfg("send_file", True):
+            # 1. 发送本子的打包文件（下载后必须打包并发送，仅支持文件消息的平台）
+            if pack_files:
+                if not _platform_supports_file(task.platform_name):
+                    await send_text(
+                        "🚫 当前消息平台不支持发送打包文件，请使用 Telegram、OneBot、"
+                        "QQ 官方机器人（websocket）消息平台。"
+                    )
+                else:
+                    for pack_name, pack_path in pack_files:
                         file_chain = MessageChain()
                         file_chain.chain.append(File(name=pack_name, file=pack_path))
                         self._bump_platform_timeouts()
@@ -714,10 +738,8 @@ class JmcomicPlugin(Star):
                                 continue
                             self.logger.exception("发送打包文件失败")
                             await send_text(
-                                f"📦 打包文件已生成，但发送失败: {e}\n路径: {pack_path}{pwd_hint}"
+                                f"📦 打包文件已生成，但发送失败: {e}{pwd_hint}"
                             )
-                    else:
-                        await send_text(f"📦 打包文件路径: {pack_path}{pwd_hint}")
 
             # 2. 引用回复发送者：下载完成
             reply_text = str(self._cfg("finish_reply", "你的本子下载完成，已发送给你"))
@@ -738,15 +760,14 @@ class JmcomicPlugin(Star):
                 reply_chain.message(
                     "⚠️ 部分内容下载失败，可重试下载（已缓存图片会跳过）。"
                 )
-            if not (self._cfg("zip_after_download", True) and pack_files):
-                reply_chain.message("📁 文件保存在: " + str(self._download_root()))
+            if not pack_files:
+                reply_chain.message("📁 文件已保存到本地。")
             try:
                 await self.context.send_message(umo, reply_chain)
             except Exception as e:
                 self.logger.exception("发送下载完成消息失败")
                 await send_text(
-                    f"✅ {reply_text}{pwd_hint}\n下载结果: {self._download_root()}\n"
-                    f"（消息发送失败: {e}）"
+                    f"✅ {reply_text}{pwd_hint}\n（消息发送失败: {e}）"
                 )
 
             # 可选：发送后删除打包文件（zip/pdf）
@@ -828,7 +849,8 @@ class JmcomicPlugin(Star):
             "• /jm cancel <任务id> — 取消下载任务\n"
             "车号支持直接粘贴文本/链接，如 JM350234、"
             "https://18comic.vip/album/350234/\n"
-            "下载完成后机器人会主动发送打包文件 zip/pdf（部分平台不支持文件消息）。"
+            "下载完成后机器人会主动发送打包文件 zip/pdf（仅支持 Telegram、"
+            "OneBot、QQ 官方机器人（websocket）平台）。"
         )
         yield event.plain_result(help_text)
 
@@ -837,6 +859,12 @@ class JmcomicPlugin(Star):
         if not self._check_permission(event):
             yield event.plain_result("⛔ 你没有权限使用下载功能（仅管理员可用，"
                                      "或到插件配置把 permission 改为 everyone）。")
+            return
+        if not _platform_supports_file(_event_platform_name(event)):
+            yield event.plain_result(
+                "🚫 当前消息平台不支持发送打包文件，请使用 Telegram、OneBot、"
+                "QQ 官方机器人（websocket）消息平台。"
+            )
             return
 
         jm = self._get_jm()
@@ -876,6 +904,7 @@ class JmcomicPlugin(Star):
             albums=albums,
             photos=photos,
             created_at=time.time(),
+            platform_name=_event_platform_name(event),
             reply_message_id=str(
                 getattr(getattr(event, "message_obj", None), "message_id", "") or ""
             ),

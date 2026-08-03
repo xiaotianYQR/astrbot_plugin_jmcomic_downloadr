@@ -70,17 +70,6 @@
     "type": "string",
     "default": ""
   },
-  "zip_after_download": {
-    "description": "下载完成后打包（zip/pdf）并发送",
-    "type": "bool",
-    "default": true
-  },
-  "send_file": {
-    "description": "尝试发送打包文件（zip/pdf）",
-    "hint": "部分平台不支持文件消息，关闭后仅返回保存路径",
-    "type": "bool",
-    "default": true
-  },
   "delete_zip_after_send": {
     "description": "发送后删除本地打包文件（zip/pdf）",
     "type": "bool",
