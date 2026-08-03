@@ -11,7 +11,7 @@
 
 > **版权与许可 / Copyright and License**
 >
-> **作者 / Author**: xiaotianYQR
+> **作者 / Author**: xiaotianYQR - xiaotianyqr123@qq.com/xiaotianyqr123@gmail.com
 >
 > **许可协议 / License**: 本项目采用 [**AGPL-3.0**](LICENSE) 开源协议，基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot)（同为 AGPL-3.0）插件框架开发，并调用 [jmcomic (JMComic-Crawler-Python)](https://github.com/hect0x7/JMComic-Crawler-Python) 作为核心下载库。基于本仓库的修改或衍生作品必须以相同协议分发。
 >
@@ -43,7 +43,7 @@
 - 🔍 **详情与搜索**：`/jm info` 查看本子详情（标题/作者/标签/章节），`/jm search` 站内搜索
 - 📋 **任务管理**：`/jm status` 查看任务，`/jm cancel` 取消下载
 - 💾 **磁盘缓存**：重复下载自动跳过已存在文件，取消任务不丢已下载内容
-- 🛡️ **平台适配**：Telegram / OneBot / QQ 官方机器人直接发送文件，其他平台主动提示
+- 🛡️ **平台适配**：仅支持 Telegram / OneBot / QQ 官方机器人，其他平台无法使用
 - ⚙️ **高度可配置**：并发数、代理、图片解码、缓存策略、权限等均可调整
 
 ## 📖 目录
@@ -82,7 +82,7 @@ pip install jmcomic pyzipper pymupdf pillow
 
 > 💡 安装后在 WebUI 插件管理页点击插件「配置」，按需修改下载目录、代理、权限等。
 
-> 📱 支持直接发送打包文件的平台：**Telegram**、**OneBot（aiocqhttp）**、**QQ 官方机器人（websocket）**；其他平台会在下载前提示不支持。
+> 📱 **平台支持**：本插件仅支持 **Telegram**、**OneBot（aiocqhttp）**、**QQ 官方机器人（websocket）**，其他平台无法使用。
 
 ## 🚀 快速开始
 
@@ -191,7 +191,7 @@ plugin_data/jmcomic_downloader/
 
 **Q：收不到打包文件？**
 
-当前仅支持 Telegram、OneBot（aiocqhttp）、QQ 官方机器人（websocket）平台直接发送文件；其他消息平台会在下载前提示不支持，请改用上述平台。
+本插件仅支持 Telegram、OneBot（aiocqhttp）、QQ 官方机器人（websocket）平台，其他平台无法使用，请改用上述平台。
 
 **Q：文件需要密码？**
 
@@ -212,6 +212,8 @@ plugin_data/jmcomic_downloader/
 **Q：大文件发送超时？**
 
 插件会自动调大 Telegram 等平台的文件上传超时；若仍失败，请检查网络后重试。
+
+> 💡 如果遇到其他问题，欢迎前往 [Issues](https://github.com/xiaotianYQR/astrbot_jmcomic_downloader/issues) 反馈。
 
 ## 📝 更新日志
 
