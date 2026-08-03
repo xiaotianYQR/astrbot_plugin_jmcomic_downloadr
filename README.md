@@ -18,6 +18,7 @@
 - 🔍 **详情与搜索**：`/jm info` 查看本子详情（标题/作者/标签/章节列表），`/jm search` 站内搜索
 - 📋 **任务管理**：`/jm status` 查看本会话任务，`/jm cancel` 取消下载
 - 💾 **磁盘缓存**：重复下载自动跳过已存在文件，取消任务不会丢失已下载内容
+- 📇 **本子缓存索引**：CSV 记录每个本子的首次下载/最近发送时间，重复请求直接发送已有打包文件，超过 24 小时无人请求自动删除
 - ⚙️ **高度可配置**：并发数、代理、图片解码、打包/发送行为、权限等均可调整
 
 ## 📖 目录
@@ -89,12 +90,19 @@ pip install jmcomic pyzipper pymupdf pillow
 | `photo_threads` | int | `0` | 同时下载章节数，`0`=按 CPU 核数自动 |
 | `retry_times` | int | `5` | 请求失败重试次数 |
 | `proxy` | string | 空 | 代理地址（如 `127.0.0.1:7890`），留空使用系统代理 |
-| `delete_zip_after_send` | bool | `false` | 发送后删除本地打包文件（zip/pdf） |
+| `pack_mode` | string | `csv_cache` | 打包文件处理模式：`csv_cache`=保留并用 CSV 索引缓存（重复请求直接发送，超时自动删除）；`delete_after_send`=发送后立即删除本地打包文件与原图目录 |
 | `zip_password` | string | 空 | 打包文件密码：zip 解压密码 / PDF 打开密码（AES-256 加密），留空不加密 |
 | `send_progress` | bool | `true` | 下载过程中发送进度消息 |
 | `max_concurrent` | int | `2` | 每个会话同时运行的最大下载任务数 |
 | `search_max` | int | `5` | 搜索结果显示的最大条数 |
 | `finish_reply` | string | `你的本子下载完成，已发送给你` | 下载完成后引用回复的文案 |
+| `cache_ttl_hours` | int | `24` | 缓存过期时间（小时），距最近一次发送超过该时长即删除 |
+| `cache_cleanup_interval_minutes` | int | `30` | 后台缓存清理检查间隔（分钟），与缓存过期时间取较小值检查 |
+| `cache_delete_raw` | bool | `true` | 缓存过期时是否同时删除原图目录 |
+| `cache_csv_path` | string | 空 | 缓存索引 CSV 路径，留空使用默认 `cache_index.csv` |
+| `cache_hit_reply` | string | `✅ 命中缓存…` | 缓存命中回复文案，支持 `{id}` `{count}` `{first}` `{last}` 占位符 |
+
+> `pack_mode` 二选一：`csv_cache` 模式下打包文件保留在本地并被 `cache_index.csv` 索引，重复请求直接发送已有文件，超过 `cache_ttl_hours` 无人请求自动删除；`delete_after_send` 模式下发送完成后立即删除打包文件与原图目录，不做任何缓存记录。
 
 ## 🗂️ 下载目录结构
 
@@ -110,8 +118,9 @@ plugin_data/jmcomic_downloader/
 │           └── 00001.jpg
 ├── zip/
 │   └── JM12345.zip              # zip 打包文件名只保留车号
-└── pdf/
-    └── JM12345.pdf              # pdf 单独存放，命名规则与 zip 一致
+├── pdf/
+│   └── JM12345.pdf              # pdf 单独存放，命名规则与 zip 一致
+└── cache_index.csv              # 缓存索引表：记录车号、文件路径、首次下载/最近发送时间、发送次数
 ```
 
 > 每个本子独立一个文件夹；打包时只包含该本子。ZIP 内部以 `车号-本子名称/` 作为顶层目录，解压后即是一个完整的本子文件夹；PDF 则把所有图片按章节/页序合成为一册，打开密码与 ZIP 解压密码同源（`zip_password`）。
@@ -123,6 +132,8 @@ plugin_data/jmcomic_downloader/
 3. 下载完成后，机器人提示 `✅ 本子下载完成: JM335492`，然后**直接发送本子的打包文件（zip/pdf）**（无多余文字）
 4. 最后**引用回复**发送者：`✅ 你的本子下载完成，已发送给你`
 5. 如果下载出错，机器人会提示 `❌ 下载错误，请重试或联系管理员`
+
+> 如果 CSV 缓存里已有该本子的打包文件（且未过期），机器人会**跳过下载**，直接发送文件并引用回复 `✅ 命中缓存，直接发送: JMxxx（累计发送 N 次）`；超过 `cache_ttl_hours`（默认 24 小时）无人请求后，该本子的打包文件与原图目录会被自动删除。
 
 ## 🔧 常见问题
 
@@ -160,12 +171,24 @@ plugin_data/jmcomic_downloader/
 
 ## 📝 更新日志
 
+### v1.12.0（2026-08-03）
+
+- 新增本子打包文件缓存：`cache_index.csv` 记录车号、文件路径、首次下载时间、最近发送时间与累计发送次数
+- 重复请求同一本子时直接发送已有打包文件，不再重复下载（支持多车号混查，命中部分直接发，未命中部分照常下载）
+- 超过 `cache_ttl_hours`（默认 24 小时）无人请求自动删除打包文件（可配置是否连同原图目录删除），后台定时清理
+- 启动时自动补录 `zip/`、`pdf/` 目录里已有的打包文件，旧文件也能立即被缓存复用
+- 新增 `pack_mode` 模式选项：`csv_cache`（默认，使用 CSV 索引缓存）/ `delete_after_send`（发送后立即删除本地打包文件与原图目录），取代原来的 `delete_zip_after_send` 开关
+- 修复定时清理：插件启动即挂起清理任务（无需等待新的下载指令）；文件删除失败（如被占用）会保留 CSV 记录并在下次清理时重试
+
 ### v1.11.0（2026-08-03）
 
 - 移除 `send_file` 配置：不再提供“关闭后仅返回保存路径”的开关
 - 新增消息平台检测：仅支持 Telegram、OneBot、QQ 官方机器人（websocket）发送打包文件，其他平台会提示改用上述平台
 - 所有下发消息不再返回本地保存路径
 - 移除 `zip_after_download` 配置：下载完成后强制打包（zip/pdf）并发送，不再提供关闭开关
+
+<details>
+<summary>📜 查看往期更新日志</summary>
 
 ### v1.10.0（2026-08-03）
 
@@ -180,9 +203,6 @@ plugin_data/jmcomic_downloader/
 
 - 重构并美化 README：新增功能特性、配置项表格、常见问题、贡献者与致谢
 - 更新插件元数据与版本徽章
-
-<details>
-<summary>📜 查看往期更新日志</summary>
 
 ### v1.6.0（2026-08-03）
 

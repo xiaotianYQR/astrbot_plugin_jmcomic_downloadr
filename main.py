@@ -23,10 +23,13 @@ JMComic 下载插件 (astrbot_plugin_jmcomic)
 from __future__ import annotations
 
 import asyncio
+import csv
 import io
 import logging
 import os
 import re
+import shutil
+import threading
 import time
 import zipfile
 try:
@@ -71,6 +74,17 @@ ZIP_SUBDIR = "zip"
 PDF_SUBDIR = "pdf"
 PDF_BRIDGE_JPEG_QUALITY = 90  # webp 等图片经 Pillow 桥接转为 JPEG 的质量
 PACK_FORMATS = ("zip", "pdf")  # 发送文件格式，二选一
+CACHE_CSV_FILENAME = "cache_index.csv"
+CACHE_CSV_FIELDS = [
+    "album_id",
+    "title",
+    "pack_format",
+    "file_path",
+    "first_download_at",
+    "last_sent_at",
+    "send_count",
+]
+CACHE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # 支持直接发送文件消息的平台类型（AstrBot 平台适配器注册名）
 FILE_SEND_PLATFORMS = ("telegram", "aiocqhttp", "qq_official", "qqofficial")
@@ -232,6 +246,20 @@ class JmcomicPlugin(Star):
         self._tasks: dict[str, DownloadTask] = {}
         self._jm: Any = None
         self._bump_platform_timeouts()
+        # 打包文件缓存：内存 dict 为准，CSV 只做持久化快照
+        self._cache_rows: dict[tuple[str, str], dict] = {}
+        self._cache_loaded = False
+        self._cache_lock = threading.RLock()
+        self._cache_cleanup_task: Optional[asyncio.Task] = None
+        self._cache_sending: set[str] = set()
+        # 启动时补录旧打包文件，并清理已过期/失效的记录
+        try:
+            self._cache_backfill()
+            self._cache_sweep()
+        except Exception:
+            self.logger.exception("启动时初始化缓存索引失败")
+        # 常驻定时清理：即使没有新的下载指令也会自动清理过期缓存
+        self._ensure_cache_cleanup()
 
     def _bump_platform_timeouts(self) -> None:
         """尽力调大平台适配器（Telegram 等）的文件上传超时。
@@ -294,6 +322,11 @@ class JmcomicPlugin(Star):
             return default
         return self.config.get(key, default)
 
+    def _pack_mode(self) -> str:
+        """打包文件处理模式：csv_cache=使用 CSV 索引缓存；delete_after_send=发送后删除。"""
+        mode = str(self._cfg("pack_mode", "csv_cache") or "csv_cache").lower()
+        return mode if mode in ("csv_cache", "delete_after_send") else "csv_cache"
+
     def _download_root(self) -> Path:
         custom = self._cfg("download_dir", "")
         if custom:
@@ -313,6 +346,260 @@ class JmcomicPlugin(Star):
         if custom:
             return Path(os.path.abspath(os.path.expanduser(str(custom))))
         return Path(get_astrbot_plugin_data_path()) / PLUGIN_DATA_DIR / PDF_SUBDIR
+
+    # ------------------------------------------------------------------
+    # 打包文件缓存（CSV 索引 + 过期清理）
+    # ------------------------------------------------------------------
+
+    def _cache_csv_path(self) -> Path:
+        """缓存索引 CSV 路径；默认放在插件数据目录下。"""
+        custom = self._cfg("cache_csv_path", "")
+        if custom:
+            return Path(os.path.abspath(os.path.expanduser(str(custom))))
+        return Path(get_astrbot_plugin_data_path()) / PLUGIN_DATA_DIR / CACHE_CSV_FILENAME
+
+    def _cache_ttl_seconds(self) -> float:
+        try:
+            hours = int(self._cfg("cache_ttl_hours", 24))
+        except (TypeError, ValueError):
+            hours = 24
+        return max(0.0, float(hours * 3600))
+
+    def _cache_now_str(self) -> str:
+        return time.strftime(CACHE_TIME_FORMAT)
+
+    @staticmethod
+    def _cache_parse_time(text: str) -> Optional[float]:
+        """把 CSV 里的时间字符串转成时间戳；解析失败返回 None。"""
+        try:
+            return time.mktime(time.strptime(text, CACHE_TIME_FORMAT))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _cache_load(self) -> None:
+        """把 CSV 读入内存（只读一次，之后以内存为准）。"""
+        with self._cache_lock:
+            if self._cache_loaded:
+                return
+            self._cache_rows = {}
+            path = self._cache_csv_path()
+            try:
+                if path.is_file():
+                    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+                        for row in csv.DictReader(f):
+                            aid = (row.get("album_id") or "").strip()
+                            fmt = (row.get("pack_format") or "").strip()
+                            if aid and fmt and row.get("file_path"):
+                                self._cache_rows[(aid, fmt)] = row
+            except Exception:
+                self.logger.exception(f"读取缓存索引失败，已备份为 .bak: {path}")
+                try:
+                    os.replace(str(path), str(path.with_suffix(".csv.bak")))
+                except OSError:
+                    pass
+                self._cache_rows = {}
+            self._cache_loaded = True
+
+    def _cache_save(self) -> None:
+        """把内存索引原子写回 CSV（临时文件 + os.replace，避免读到半截文件）。"""
+        with self._cache_lock:
+            path = self._cache_csv_path()
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(path.name + ".tmp")
+                with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=CACHE_CSV_FIELDS)
+                    writer.writeheader()
+                    for row in sorted(
+                        self._cache_rows.values(),
+                        key=lambda r: (r.get("album_id", ""), r.get("pack_format", "")),
+                    ):
+                        writer.writerow({k: row.get(k, "") for k in CACHE_CSV_FIELDS})
+                os.replace(str(tmp), str(path))
+            except Exception:
+                self.logger.exception(f"保存缓存索引失败: {path}")
+
+    def _cache_find(self, album_id: str, pack_format: str) -> Optional[dict]:
+        """按 (车号, 格式) 查缓存记录；未启用缓存时返回 None。"""
+        if self._pack_mode() != "csv_cache":
+            return None
+        self._cache_load()
+        with self._cache_lock:
+            row = self._cache_rows.get((album_id, pack_format))
+            return dict(row) if row else None
+
+    def _cache_upsert(self, album_id: str, title: str, pack_format: str, file_path: str) -> None:
+        """发送成功后登记/更新一行；首次下载时间只在首次写入。"""
+        if self._pack_mode() != "csv_cache":
+            return
+        self._cache_load()
+        now = self._cache_now_str()
+        with self._cache_lock:
+            row = self._cache_rows.get((album_id, pack_format))
+            if row is None:
+                row = {k: "" for k in CACHE_CSV_FIELDS}
+                row["album_id"] = album_id
+                row["pack_format"] = pack_format
+                row["first_download_at"] = now
+                row["send_count"] = "0"
+                self._cache_rows[(album_id, pack_format)] = row
+            if title:
+                row["title"] = title
+            row["file_path"] = os.path.abspath(str(file_path))
+            row["last_sent_at"] = now
+            try:
+                row["send_count"] = str(int(row.get("send_count") or 0) + 1)
+            except (TypeError, ValueError):
+                row["send_count"] = "1"
+            self._cache_save()
+
+    def _cache_remove(self, album_id: str, pack_format: str) -> None:
+        with self._cache_lock:
+            if self._cache_rows.pop((album_id, pack_format), None) is not None:
+                self._cache_save()
+
+    def _delete_cached_files(self, album_id: str, file_path: str) -> bool:
+        """删除过期本子的打包文件；按配置决定是否连同原图目录删除。
+
+        返回是否删除成功；失败时（如文件被占用）由调用方保留记录以便下次重试。
+        """
+        ok = True
+        try:
+            if file_path and os.path.isfile(file_path):
+                os.remove(file_path)
+        except OSError as e:
+            ok = False
+            self.logger.warning(f"删除缓存文件失败: {file_path}: {e}")
+        if ok and self._cfg("cache_delete_raw", True):
+            try:
+                for folder in self._download_root().glob(f"{album_id}-*"):
+                    if folder.is_dir():
+                        shutil.rmtree(str(folder))
+            except OSError as e:
+                ok = False
+                self.logger.warning(f"删除原图目录失败: {album_id}: {e}")
+        return ok
+
+    @staticmethod
+    def _prune_empty_dirs(path: str, root: str) -> None:
+        """逐级删除空的上级目录（到 download_root 为止），删除失败即停止。"""
+        parent = os.path.dirname(path)
+        while parent and os.path.abspath(parent) != os.path.abspath(root):
+            try:
+                if not os.path.isdir(parent) or os.listdir(parent):
+                    break
+                os.rmdir(parent)
+            except OSError:
+                break
+            parent = os.path.dirname(parent)
+
+    def _cache_sweep(self) -> int:
+        """清理过期/失效行：距最近发送超过 TTL 的文件删除并移除记录。"""
+        if self._pack_mode() != "csv_cache":
+            return 0
+        self._cache_load()
+        now = time.time()
+        ttl = self._cache_ttl_seconds()
+        removed = []
+        with self._cache_lock:
+            for (aid, fmt), row in list(self._cache_rows.items()):
+                path = row.get("file_path") or ""
+                if path and os.path.abspath(path) in self._cache_sending:
+                    continue  # 正在发送的文件不删
+                last = self._cache_parse_time(row.get("last_sent_at") or "")
+                expired = ttl > 0 and last is not None and now - last >= ttl
+                file_exists = bool(path) and os.path.isfile(path)
+                if expired:
+                    # 删除成功才移除记录；删除失败（如文件被占用）留到下次重试
+                    if self._delete_cached_files(aid, path):
+                        removed.append((aid, fmt, path))
+                        self._cache_rows.pop((aid, fmt), None)
+                elif not file_exists:
+                    # 文件已丢失的记录直接清掉，避免残留脏行
+                    removed.append((aid, fmt, path))
+                    self._cache_rows.pop((aid, fmt), None)
+            if removed:
+                self._cache_save()
+        for aid, fmt, path in removed:
+            self.logger.info(f"缓存清理: JM{aid} [{fmt}] -> {path}")
+        return len(removed)
+
+    def _cache_backfill(self) -> None:
+        """启动时把 zip/pdf 目录里已存在的打包文件补录进索引（按文件修改时间）。"""
+        if self._pack_mode() != "csv_cache":
+            return
+        self._cache_load()
+        changed = False
+        with self._cache_lock:
+            for fmt, root in (("zip", self._pack_root()), ("pdf", self._pdf_root())):
+                try:
+                    files = list(root.glob(f"JM*.{fmt}"))
+                except OSError:
+                    continue
+                for p in files:
+                    m = re.match(r"JM(\d+)\.", p.name)
+                    if not m:
+                        continue
+                    aid = m.group(1)
+                    key = (aid, fmt)
+                    if key in self._cache_rows:
+                        continue
+                    try:
+                        mtime = time.strftime(
+                            CACHE_TIME_FORMAT, time.localtime(p.stat().st_mtime)
+                        )
+                    except OSError:
+                        continue
+                    self._cache_rows[key] = {
+                        "album_id": aid,
+                        "title": "",
+                        "pack_format": fmt,
+                        "file_path": str(p),
+                        "first_download_at": mtime,
+                        "last_sent_at": mtime,
+                        "send_count": "0",
+                    }
+                    changed = True
+            if changed:
+                self._cache_save()
+
+    async def _cache_cleanup_loop(self) -> None:
+        """后台定时清理：启动后立即清理一次，之后按「清理间隔」与 TTL 中较小值定期检查过期缓存。"""
+        while True:
+            try:
+                self._cache_sweep()
+            except Exception:
+                self.logger.exception("缓存清理任务出错")
+            try:
+                try:
+                    interval = max(
+                        60, int(self._cfg("cache_cleanup_interval_minutes", 30)) * 60
+                    )
+                except (TypeError, ValueError):
+                    interval = 30 * 60
+                ttl = self._cache_ttl_seconds()
+                if ttl > 0:
+                    interval = min(interval, max(60.0, ttl))
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+
+    def _ensure_cache_cleanup(self) -> None:
+        """启动常驻清理任务；没有运行中的事件循环时等待下一次命令再启动。"""
+        if self._pack_mode() != "csv_cache":
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # 当前没有运行中的事件循环，等待下一次命令再启动
+        if self._cache_cleanup_task is None or self._cache_cleanup_task.done():
+            self._cache_cleanup_task = asyncio.create_task(
+                self._cache_cleanup_loop()
+            )
+            self.logger.info(
+                "打包文件缓存清理任务已启动（默认每 %s 分钟检查一次过期缓存）",
+                self._cfg("cache_cleanup_interval_minutes", 30),
+            )
 
     def _check_permission(self, event: AstrMessageEvent) -> bool:
         mode = self._cfg("permission", "admin")
@@ -646,7 +933,8 @@ class JmcomicPlugin(Star):
             # 逐条处理：统计成功/失败，按配置格式打包（zip/pdf 二选一）
             summary: list[str] = []
             failed_any = False
-            pack_files: list[tuple[str, str]] = []  # (name, abs path)
+            pack_files: list[tuple[str, str, str, str]] = []  # (name, path, album_id, title)
+            pack_dirs: list[str] = []  # 与 pack_files 一一对应的原图目录
             zip_password = str(self._cfg("zip_password", "") or "").strip()
             pack_format = str(self._cfg("pack_format", "zip") or "zip").lower()
             if pack_format not in PACK_FORMATS:
@@ -709,7 +997,8 @@ class JmcomicPlugin(Star):
                             self._zip_dir(
                                 target_dir, pack_path, arc_root, zip_password
                             )
-                        pack_files.append((pack_name, pack_path))
+                        pack_files.append((pack_name, pack_path, entity_id, title))
+                        pack_dirs.append(target_dir)
                     except Exception as e:
                         self.logger.exception(f"打包失败: {target_dir}")
                         summary.append(f"  ⚠️ 打包失败: {e}")
@@ -722,12 +1011,15 @@ class JmcomicPlugin(Star):
                         "QQ 官方机器人（websocket）消息平台。"
                     )
                 else:
-                    for pack_name, pack_path in pack_files:
+                    for pack_name, pack_path, album_id, title in pack_files:
                         file_chain = MessageChain()
                         file_chain.chain.append(File(name=pack_name, file=pack_path))
                         self._bump_platform_timeouts()
+                        sent = False
+                        self._cache_sending.add(os.path.abspath(pack_path))
                         try:
                             await self.context.send_message(umo, file_chain)
+                            sent = True
                         except Exception as e:
                             # 大文件上传超时（Timed out）时，文件往往已送达，
                             # 此时不发送“发送失败”的误导提示，仅记录日志。
@@ -735,10 +1027,18 @@ class JmcomicPlugin(Star):
                                 self.logger.warning(
                                     f"打包文件发送超时（可能已送达）: {pack_name}, {e}"
                                 )
-                                continue
-                            self.logger.exception("发送打包文件失败")
-                            await send_text(
-                                f"📦 打包文件已生成，但发送失败: {e}{pwd_hint}"
+                                sent = True
+                            else:
+                                self.logger.exception("发送打包文件失败")
+                                await send_text(
+                                    f"📦 打包文件已生成，但发送失败: {e}{pwd_hint}"
+                                )
+                        finally:
+                            self._cache_sending.discard(os.path.abspath(pack_path))
+                        if sent:
+                            # 发送成功后登记/更新 CSV 缓存索引
+                            self._cache_upsert(
+                                album_id, title, pack_format, pack_path
                             )
 
             # 2. 引用回复发送者：下载完成
@@ -770,13 +1070,18 @@ class JmcomicPlugin(Star):
                     f"✅ {reply_text}{pwd_hint}\n（消息发送失败: {e}）"
                 )
 
-            # 可选：发送后删除打包文件（zip/pdf）
-            if self._cfg("delete_zip_after_send", False):
-                for _, pack_path in pack_files:
+            # 发送后删除模式：打包文件与原图目录发送后立即删除，不做 CSV 缓存
+            if self._pack_mode() == "delete_after_send":
+                root = str(self._download_root())
+                for (_, pack_path, _, _), target_dir in zip(pack_files, pack_dirs):
                     try:
-                        os.remove(pack_path)
-                    except OSError:
-                        pass
+                        if pack_path and os.path.isfile(pack_path):
+                            os.remove(pack_path)
+                        if target_dir and os.path.isdir(target_dir):
+                            shutil.rmtree(target_dir)
+                    except OSError as e:
+                        self.logger.warning(f"发送后删除失败: {target_dir}: {e}")
+                    self._prune_empty_dirs(target_dir, root)
 
             task.status = "done"
             task.message = "\n".join(summary)
@@ -885,6 +1190,100 @@ class JmcomicPlugin(Star):
             return
 
         session_key = event.unified_msg_origin
+
+        # ---- 缓存命中：整本请求先查 CSV，有打包文件就直接发，不创建下载任务 ----
+        self._ensure_cache_cleanup()
+        pack_format = str(self._cfg("pack_format", "zip") or "zip").lower()
+        if pack_format not in PACK_FORMATS:
+            pack_format = "zip"
+        if pack_format == "pdf" and fitz is None:
+            pack_format = "zip"  # 与 _download_job 的回退逻辑保持一致
+        hit_packs: list[tuple[str, str, dict]] = []  # (album_id, file_path, row)
+        miss_albums: list[str] = []
+        for aid in albums:
+            row = self._cache_find(aid, pack_format)
+            path = row.get("file_path", "") if row else ""
+            if row and path and os.path.isfile(path):
+                last = self._cache_parse_time(row.get("last_sent_at") or "")
+                ttl = self._cache_ttl_seconds()
+                expired = (
+                    ttl > 0
+                    and last is not None
+                    and time.time() - last >= ttl
+                )
+                if expired:
+                    # 已超过 TTL 无人请求：删除文件并走全新下载
+                    self._delete_cached_files(aid, path)
+                    self._cache_remove(aid, pack_format)
+                    miss_albums.append(aid)
+                else:
+                    hit_packs.append((aid, path, row))
+            else:
+                if row:
+                    # 记录在但文件丢失，清掉脏行后重新下载
+                    self._cache_remove(aid, pack_format)
+                miss_albums.append(aid)
+
+        if hit_packs:
+            reply_mid: Any = str(
+                getattr(getattr(event, "message_obj", None), "message_id", "") or ""
+            )
+            for aid, path, row in hit_packs:
+                sent = False
+                self._cache_sending.add(os.path.abspath(path))
+                file_chain = MessageChain()
+                file_chain.chain.append(File(name=os.path.basename(path), file=path))
+                try:
+                    await self.context.send_message(session_key, file_chain)
+                    sent = True
+                except Exception as e:
+                    if _looks_like_timeout(e):
+                        self.logger.warning(
+                            f"缓存文件发送超时（可能已送达）: {path}, {e}"
+                        )
+                        sent = True
+                    else:
+                        self.logger.exception("发送缓存文件失败")
+                        await self.context.send_message(
+                            session_key,
+                            MessageChain().message(f"📦 缓存文件发送失败: {e}"),
+                        )
+                finally:
+                    self._cache_sending.discard(os.path.abspath(path))
+                if not sent:
+                    continue
+                # 发送成功后更新 CSV 里的最近发送时间与累计次数
+                self._cache_upsert(aid, row.get("title", ""), pack_format, path)
+                new_row = self._cache_find(aid, pack_format) or row
+                template = str(
+                    self._cfg(
+                        "cache_hit_reply",
+                        "✅ 命中缓存，直接发送: JM{id}（累计发送 {count} 次）",
+                    )
+                )
+                text = (
+                    template.replace("{id}", aid)
+                    .replace("{count}", new_row.get("send_count", ""))
+                    .replace("{first}", new_row.get("first_download_at", ""))
+                    .replace("{last}", new_row.get("last_sent_at", ""))
+                )
+                reply_chain = MessageChain()
+                if reply_mid:
+                    mid: Any = reply_mid
+                    if str(mid).isdigit():
+                        mid = int(mid)
+                    reply_chain.chain.append(Reply(id=mid))
+                reply_chain.message(text)
+                try:
+                    await self.context.send_message(session_key, reply_chain)
+                except Exception as e:
+                    self.logger.exception("发送缓存命中提示失败: {e}")
+
+        if not miss_albums and not photos:
+            event.stop_event()  # 全部命中，不再创建下载任务
+            return
+        albums = miss_albums
+
         max_concurrent = max(1, int(self._cfg("max_concurrent", 2)))
         if self._active_task_count(session_key) >= max_concurrent:
             yield event.plain_result(
@@ -1046,3 +1445,6 @@ class JmcomicPlugin(Star):
             if task.status == "running" and task.asyncio_task:
                 task.asyncio_task.cancel()
         self._tasks.clear()
+        if self._cache_cleanup_task:
+            self._cache_cleanup_task.cancel()
+            self._cache_cleanup_task = None

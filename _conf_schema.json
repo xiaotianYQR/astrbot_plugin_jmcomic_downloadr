@@ -18,13 +18,13 @@
     "default": ""
   },
   "pdf_dir": {
-    "description": "PDF 输出目录（与 zip 分开存放）",
+    "description": "PDF 输出目录",
     "hint": "留空则使用 plugin_data/jmcomic_downloader/pdf",
     "type": "string",
     "default": ""
   },
   "pack_format": {
-    "description": "发送文件格式（zip 和 pdf 二选一）",
+    "description": "发送文件格式",
     "hint": "zip=压缩包（保留目录结构）；pdf=把所有图片合成为一个 PDF，文件名与 zip 规则一致；未安装 pymupdf 时自动回退为 zip",
     "type": "string",
     "default": "zip",
@@ -70,10 +70,12 @@
     "type": "string",
     "default": ""
   },
-  "delete_zip_after_send": {
-    "description": "发送后删除本地打包文件（zip/pdf）",
-    "type": "bool",
-    "default": false
+  "pack_mode": {
+    "description": "打包文件处理模式",
+    "hint": "csv_cache=保留打包文件并用 CSV 索引缓存（重复请求直接发送，超时自动删除）；delete_after_send=发送后立即删除本地打包文件与原图目录",
+    "type": "string",
+    "default": "csv_cache",
+    "options": ["csv_cache", "delete_after_send"]
   },
   "zip_password": {
     "description": "打包文件密码（zip 解压 / PDF 打开，AES-256 加密）",
@@ -100,5 +102,34 @@
     "description": "下载完成后回复发送者的文案",
     "type": "string",
     "default": "你的本子下载完成，已发送给你"
+  },
+  "cache_ttl_hours": {
+    "description": "缓存过期时间（小时）",
+    "hint": "距最近一次发送超过该时长且无人再请求时，删除该本子的打包文件",
+    "type": "int",
+    "default": 24
+  },
+  "cache_cleanup_interval_minutes": {
+    "description": "缓存清理检查间隔（分钟）",
+    "hint": "后台定时扫描过期缓存（与缓存过期时间取较小值），最小 1 分钟",
+    "type": "int",
+    "default": 30
+  },
+  "cache_delete_raw": {
+    "description": "缓存过期时是否同时删除原图目录",
+    "type": "bool",
+    "default": true
+  },
+  "cache_csv_path": {
+    "description": "缓存索引 CSV 路径",
+    "hint": "留空则使用 plugin_data/jmcomic_downloader/cache_index.csv",
+    "type": "string",
+    "default": ""
+  },
+  "cache_hit_reply": {
+    "description": "缓存命中时的回复文案",
+    "hint": "支持占位符 {id} {count} {first} {last}，分别对应车号、累计发送次数、首次下载时间、最近发送时间",
+    "type": "string",
+    "default": "✅ 命中缓存，直接发送: JM{id}（累计发送 {count} 次）"
   }
 }
