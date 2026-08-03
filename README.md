@@ -89,8 +89,6 @@ pip install jmcomic pyzipper pymupdf pillow
 | `photo_threads` | int | `0` | 同时下载章节数，`0`=按 CPU 核数自动 |
 | `retry_times` | int | `5` | 请求失败重试次数 |
 | `proxy` | string | 空 | 代理地址（如 `127.0.0.1:7890`），留空使用系统代理 |
-| `zip_after_download` | bool | `true` | 下载完成后打包（zip/pdf）并发送 |
-| `send_file` | bool | `true` | 尝试发送打包文件，关闭后仅返回保存路径 |
 | `delete_zip_after_send` | bool | `false` | 发送后删除本地打包文件（zip/pdf） |
 | `zip_password` | string | 空 | 打包文件密码：zip 解压密码 / PDF 打开密码（AES-256 加密），留空不加密 |
 | `send_progress` | bool | `true` | 下载过程中发送进度消息 |
@@ -138,7 +136,7 @@ plugin_data/jmcomic_downloader/
 
 **Q：收不到打包文件？**
 
-部分平台不支持文件消息，插件会退回发送文件保存路径；也可将 `send_file` 配置为 `false`，只返回路径。
+当前仅支持 Telegram、OneBot（aiocqhttp）、QQ 官方机器人（websocket）平台直接发送文件；其他消息平台会在下载前提示不支持，请改用上述平台。
 
 **Q：文件需要密码？**
 
@@ -158,9 +156,16 @@ plugin_data/jmcomic_downloader/
 
 **Q：大文件发送超时？**
 
-插件会自动调大 Telegram 等平台的文件上传超时；若仍失败，请检查网络或改用 `send_file: false` 获取本地路径。
+插件会自动调大 Telegram 等平台的文件上传超时；若仍失败，请检查网络后重试。
 
 ## 📝 更新日志
+
+### v1.11.0（2026-08-03）
+
+- 移除 `send_file` 配置：不再提供“关闭后仅返回保存路径”的开关
+- 新增消息平台检测：仅支持 Telegram、OneBot、QQ 官方机器人（websocket）发送打包文件，其他平台会提示改用上述平台
+- 所有下发消息不再返回本地保存路径
+- 移除 `zip_after_download` 配置：下载完成后强制打包（zip/pdf）并发送，不再提供关闭开关
 
 ### v1.10.0（2026-08-03）
 

@@ -2,6 +2,10 @@ name: jmcomic_downloader
 repo: https://github.com/xiaotianYQR/astrbot_jmcomic_downloader
 display_name: JMComic 下载器
 desc: 基于 jmcomic 的禁漫本子下载、搜索、详情查询插件，支持后台下载并打包 zip/pdf 发送。
-version: v1.10.0
+version: v1.11.0
 author: xiaotianYQR
 astrbot_version: ">=4.13.0"
+support_platforms:
+  - aiocqhttp
+  - telegram
+  - qq_official
