@@ -1146,16 +1146,27 @@ class JmcomicPlugin(Star):
         """查看 JMComic 插件帮助"""
         help_text = (
             "🛠 JMComic 插件使用说明\n"
-            "• /jm <车号...> — 下载本子，支持多个车号，"
-            "章节号加 p 前缀，如: /jm 123 p456\n"
-            "• /jm info <车号> — 查看本子详情\n"
-            "• /jm search <关键词> — 站内搜索\n"
-            "• /jm status — 查看本会话下载任务\n"
+            "\n📥 下载\n"
+            "• /jm <车号...> — 下载本子，支持多个车号/章节，如:\n"
+            "  /jm 123\n"
+            "  /jm 123 456\n"
+            "  /jm 123 p456（章节号加 p 前缀）\n"
+            "\n🔍 详情与搜索\n"
+            "• /jm info <车号> — 查看本子详情，不下载"
+            "（别名: /jm i、/jm 查看）\n"
+            "• /jm search <关键词> — 站内搜索"
+            "（别名: /jm s、/jm 搜）\n"
+            "\n📋 任务管理\n"
+            "• /jm status — 查看本会话的下载任务\n"
             "• /jm cancel <任务id> — 取消下载任务\n"
-            "车号支持直接粘贴文本/链接，如 JM350234、"
-            "https://18comic.vip/album/350234/\n"
-            "下载完成后机器人会主动发送打包文件 zip/pdf（仅支持 Telegram、"
-            "OneBot、QQ 官方机器人（websocket）平台）。"
+            "• /jm help — 显示本帮助\n"
+            "\n📌 使用说明\n"
+            "• 车号支持直接粘贴文本或链接，如: JM335492、"
+            "https://18comic.vip/album/335492/\n"
+            "• 下载任务完成后，机器人会自动发送打包文件"
+            "（zip/pdf）\n"
+            "• 发送文件仅支持 Telegram、OneBot、QQ 官方机器人"
+            "（websocket）平台"
         )
         yield event.plain_result(help_text)
 
@@ -1431,7 +1442,8 @@ class JmcomicPlugin(Star):
         if album.works:
             lines.append(f"📚 作品: {', '.join(album.works)}")
         lines.append(f"📑 章节 ({len(album)}):")
-        for idx, (pid, _pindex, pname, _pdate) in enumerate(album.episode_list, 1):
+        # jmcomic 的 episode_list 元素为 3 元组 (photo_id, photo_index, photo_title)
+        for idx, (pid, _pindex, pname) in enumerate(album.episode_list, 1):
             lines.append(f"  {idx}. {pname} (id: {pid})")
         return "\n".join(lines)
 
